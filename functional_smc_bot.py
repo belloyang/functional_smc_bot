@@ -23,13 +23,27 @@ trade_client = config.trading_client
 
 # ================= DATA =================
 
+from datetime import datetime, timedelta
+
 def get_bars(symbol, timeframe, limit):
-    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, limit=limit)
+    # Calculate a lookback to ensure we have enough data (e.g. 5 days)
+    # This prevents the API from defaulting to "today only" which breaks indicators like EMA50
+    start_dt = datetime.now() - timedelta(days=5)
+    
+    # Request a large chunk of data starting from 5 days ago to ensure we capture the most recent data
+    # limit=10000 is typically sufficient for 1Min bars over 5 days (~2000 bars)
+    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, limit=10000, start=start_dt)
     bars = data_client.get_stock_bars(req).df
     bars = bars.reset_index()
-    print(f"Bars columns: {bars.columns}")
+    
     if bars.empty:
         print("Bars df is empty!")
+        return bars
+
+    # Slice the dataframe to return only the requested 'limit' of MOST RECENT bars
+    if len(bars) > limit:
+        bars = bars.iloc[-limit:]
+        
     return bars
 
 # ================= SMC LOGIC (CAUSAL) =================
