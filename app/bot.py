@@ -350,6 +350,10 @@ def place_trade(signal, symbol):
         elif side_held == OrderSide.SELL: 
              print(f"Closing Short Position ({qty_held} shares) due to BUY signal.")
              try:
+                # Safety: Cancel any existing open orders (SL/TP) for this symbol first
+                trade_client.cancel_orders(symbols=[symbol])
+                print(f"Cancelled open orders for {symbol}")
+                
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
                 print("✅ SHORT CLOSE SUBMITTED")
@@ -366,6 +370,10 @@ def place_trade(signal, symbol):
         elif side_held == OrderSide.BUY: # We are Long
             print(f"Closing Long Position ({qty_held} shares) due to SELL signal.")
             try:
+                # Safety: Cancel any existing open orders (SL/TP) for this symbol first
+                trade_client.cancel_orders(symbols=[symbol])
+                print(f"Cancelled open orders for {symbol}")
+                
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
                 print("✅ LONG CLOSE SUBMITTED")
