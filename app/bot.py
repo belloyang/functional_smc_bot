@@ -324,6 +324,18 @@ def get_best_option_contract(symbol, signal_type, known_price=None):
         print(f"Error getting option contract: {e}")
         return None
 
+def get_current_position(symbol):
+    """
+    Fetches the current position for the given symbol.
+    Returns the Position object if found, else None.
+    """
+    try:
+        position = trade_client.get_open_position(symbol)
+        return position
+    except Exception as e:
+        # 404 error typically means no position found, which is fine
+        return None
+
 def place_trade(signal, symbol):
     # Get latest price
     # Fix: Use TimeFrame object
@@ -333,25 +345,41 @@ def place_trade(signal, symbol):
         return
     price = price_df['close'].iloc[-1]
     
-    # Check if Options Trading is Enabled
+    # 1. Check for Existing Position
+    current_position = get_current_position(symbol)
+    qty_held = float(current_position.qty) if current_position else 0
+    side_held = current_position.side if current_position else None # OrderSide.BUY (Long) or OrderSide.SELL (Short)
+    
+    print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held})")
+
+    # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
+        # NOTE: Position handling for Options is complex because we trade contracts (diff symbols), 
+        # not the underlying symbol directly.
+        # For this MVP, we will only trade if we don't have ANY position in the underlying to keep it simple.
+        # A full Option Bot would need to track contract symbols.
+        
+        # Improvement: Check if we hold any options for this symbol?
+        # For now, let's stick to the previous simple logic but slightly safer:
+        # If we have a position in the underlying (e.g. assigned shares), don't trade options on top blindly.
+        if qty_held != 0:
+             print(f"Warning: Holding underlying shares ({qty_held}) while in Options Mode. Skipping new option entries to avoid mix-up.")
+             return
+
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         contract = get_best_option_contract(symbol, signal)
         
         if contract:
-            # For Options, the symbol to trade IS the contract symbol
             trade_symbol = contract.symbol
+            # Check if we already hold THIS specific contract
+            contract_pos = get_current_position(trade_symbol)
+            if contract_pos and float(contract_pos.qty) > 0:
+                 print(f"Already hold {trade_symbol}. Holding.")
+                 return
+
             # MVP: Trade 1 contract
             qty = 1 
-            print(f"Placing OPTION order: {signal.upper()} {qty}x {trade_symbol}")
-            
-            # Note: For options, we typically BUY to Open.
-            # If signal is 'buy' (bullish) -> Buy Call
-            # If signal is 'sell' (bearish) -> Buy Put (Bot logic generates 'sell' signal for bearish bias)
-            # So in both cases side is BUY? 
-            # WAIT. The bot generates 'sell' signal. 
-            # get_best_option_contract handles the type (PUT).
-            # So we just need to BUY the contract (Long Call or Long Put).
+            # Both Call and Put are "BUY" to Open
             side = OrderSide.BUY 
             
             try:
@@ -370,28 +398,81 @@ def place_trade(signal, symbol):
         else:
              print("Could not find suitable option contract. Falling back to shares.")
 
-    # FALLBACK / STANDARD SHARE TRADING
-    qty = calculate_position_size(price)
+    # ================= STOCK MODE =================
     
-    if qty <= 0:
-        print("Quantity is 0, skipping trade.")
-        return
+    # Logic matrix:
+    # BUY Signal:
+    #   - No Position: BUY
+    #   - Short Position: CLOSE Short (Buy to Cover), then BUY Long? -> MVP: Just Close Short.
+    #   - Long Position: HOLD (Don't pyramid)
+    
+    # SELL Signal:
+    #   - No Position: IGNORE (No Shorting allowed per user rule)
+    #   - Long Position: SELL ALL (Exit)
+    #   - Short Position: HOLD
+    
+    if signal == "buy":
+        if qty_held == 0:
+            # Enter Long
+            qty = calculate_position_size(price)
+            if qty <= 0:
+                print("Calculated Quantity is 0, skipping trade.")
+                return
 
-    side = OrderSide.BUY if signal == "buy" else OrderSide.SELL
-    
-    print(f"Placing {signal.upper()} order for {qty} shares of {symbol} at approx {price}")
-    
-    try:
-        order = MarketOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            time_in_force=TimeInForce.DAY
-        )
-        trade_client.submit_order(order)
-        print(f"✅ {signal.upper()} ORDER SUBMITTED")
-    except Exception as e:
-        print(f"❌ Order failed: {e}")
+            print(f"Placing BUY order for {qty} shares of {symbol} at approx {price}")
+            try:
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                trade_client.submit_order(order)
+                print("✅ BUY ORDER SUBMITTED")
+            except Exception as e:
+                print(f"❌ Order failed: {e}")
+        
+        elif side_held == OrderSide.SELL: # We are Short
+             print(f"Closing Short Position ({qty_held} shares) due to BUY signal.")
+             try:
+                # To close a Short, we BUY same qty
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=abs(qty_held),
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                trade_client.submit_order(order)
+                print("✅ SHORT CLOSE SUBMITTED")
+             except Exception as e:
+                print(f"❌ Close Short failed: {e}")
+        
+        else: # We are Long
+            print(f"Already Long {qty_held} shares. Ignoring BUY signal (No Pyramiding).")
+
+    elif signal == "sell":
+        if qty_held == 0:
+            # No Shorting allowed
+            print("SELL Signal detected but no position held. Skipping Short Entry (Long-Only Mode).")
+            return
+            
+        elif side_held == OrderSide.BUY: # We are Long
+            print(f"Closing Long Position ({qty_held} shares) due to SELL signal.")
+            try:
+                # To close a Long, we SELL same qty
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=abs(qty_held),
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY
+                )
+                trade_client.submit_order(order)
+                print("✅ LONG CLOSE SUBMITTED")
+            except Exception as e:
+                 print(f"❌ Close Long failed: {e}")
+                 
+        else: # We are Short
+            print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
 
 # ================= MAIN LOOP =================
 
