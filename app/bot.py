@@ -230,19 +230,38 @@ def generate_signal(symbol=None):
 # ================= RISK =================
 
 def calculate_position_size(price):
-    if hasattr(config, 'ACCOUNT_BALANCE'):
-        balance = config.ACCOUNT_BALANCE
-    else:
-        try:
-            balance = float(trade_client.get_account().equity)
-        except:
-            balance = 10000 # Fallback
+    try:
+        account = trade_client.get_account()
+        equity = float(account.equity)
+        buying_power = float(account.buying_power)
+        # Check cash too if it's a cash account, but buying_power generally handles it
+        # For safety/clarity check 'cash' if 'pattern_day_trader' is false? 
+        # buying_power is safer generic field.
+    except Exception as e:
+        print(f"Error fetching account info: {e}")
+        # Fallback to config or hardcoded for testing/offline
+        equity = 10000.0
+        buying_power = 10000.0
         
-    risk_amount = float(balance) * RISK_PER_TRADE
+    risk_amount = equity * RISK_PER_TRADE
     stop_loss_distance = price * 0.005  # 0.5% stop
+    
     if stop_loss_distance == 0: return 0
-    qty = risk_amount / stop_loss_distance
-    return int(qty)
+    
+    # Raw risk-based quantity
+    qty_risk = risk_amount / stop_loss_distance
+    
+    # Cap by Buying Power (leave buffer 5%)
+    # cost = qty * price
+    max_cost = buying_power * 0.95
+    qty_bp = max_cost / price
+    
+    # Final Quantity is min of Risk Qty and BP Qty
+    qty = int(min(qty_risk, qty_bp))
+    
+    print(f"DEBUG: Equity: ${equity:.2f} | BP: ${buying_power:.2f} | RiskQty: {int(qty_risk)} | BPQty: {int(qty_bp)} -> Final: {qty}")
+    
+    return max(0, qty)
 
 # ================= EXECUTION =================
 
