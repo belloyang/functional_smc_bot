@@ -1,0 +1,53 @@
+# Alpaca Trading Bot
+
+This is a trading bot that uses Alpaca API to trade stocks and options.
+
+## Features
+- Backtesting
+- Option trading
+- Stock trading
+- Risk management
+- Order management
+
+## Prerequisites
+
+- Python 3.12
+- Alpaca API key
+- Alpaca API secret
+- Alpaca API paper trading
+
+## Installation
+TODO
+
+
+## Configuration
+Update alpaca_config.py with your Alpaca API key and secret.
+
+# Run backtest
+## Options
+```bash
+python3.12 backtest.py QQQ --options
+```
+
+## Stocks
+```bash
+python3.12 backtest.py QQQ
+```
+
+
+# Run live trading
+## Options
+Update ENABLE_OPTIONS to True in alpaca_config.py
+```bash
+python3.12 functional_smc_bot.py QQQ 
+
+```
+
+## Stocks
+Update ENABLE_OPTIONS to False in alpaca_config.py
+```bash
+python3.12 functional_smc_bot.py QQQ 
+```
+
+
+
