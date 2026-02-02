@@ -117,19 +117,32 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
     
     start_idx = 400 # Warmup for vol and indicators
     
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("US/Eastern")
+    
     for i in range(start_idx, len(ltf_data)):
         current_bar = ltf_data.iloc[i]
-        current_time = current_bar.name
+        current_time_utc = current_bar.name
         
+        # Convert to US/Eastern for filtering and logging
+        current_time_et = current_time_utc.astimezone(ET)
+        
+        # --- MARKET HOURS FILTER (9:30 AM - 4:00 PM ET) ---
+        market_open = current_time_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = current_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        
+        if not (market_open <= current_time_et <= market_close):
+            continue
+            
         # Get HTF data up to current_time
-        htf_slice = htf_data[htf_data.index <= current_time]
+        htf_slice = htf_data[htf_data.index <= current_time_utc]
         if len(htf_slice) < 50:
             continue
             
         current_vol = htf_slice.iloc[-1]['volatility']
         htf_slice = htf_slice.iloc[-200:] # Limit to last 200 HTF for speed
         ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
-
+        
         # Run Strategy
         signal = get_strategy_signal(htf_slice, ltf_slice)
         
@@ -147,8 +160,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                         balance -= cost
                         position = qty
                         entry_price = price
-                        trades.append({'time': current_time, 'type': 'buy_stock', 'price': price, 'qty': qty})
-                        print(f"[{current_time}] BUY STOCK @ {price:.2f} | Qty: {qty}")
+                        trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty})
+                        print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty}")
                 
                 elif trade_type == "options":
                     strike = round(price)
@@ -163,9 +176,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                         balance -= contract_cost
                         position = 1
                         entry_price = premium
-                        option_contract = {'strike': strike, 'expiry_days': days_to_expiry, 'entry_time': current_time, 'type': 'call'}
-                        trades.append({'time': current_time, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time}] BUY CALL  @ {premium:.2f} (Strk: {strike}) | Vol: {sigma:.2f}")
+                        option_contract = {'strike': strike, 'expiry_days': days_to_expiry, 'entry_time': current_time_utc, 'type': 'call'}
+                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
+                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Strk: {strike}) | Vol: {sigma:.2f}")
 
             elif position < 0 or (option_contract and option_contract['type'] == 'put'):
                 # Exit Bearish Position FIRST
@@ -174,7 +187,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                     pass
                 elif trade_type == "options":
                     # Sell to Close Put
-                    time_held = current_time - option_contract['entry_time']
+                    time_held = current_time_utc - option_contract['entry_time']
                     days_passed = time_held.total_seconds() / (24 * 3600)
                     T_remain = (option_contract['expiry_days'] - days_passed) / 365.0
                     sigma = current_vol if current_vol > 0 else 0.2
@@ -183,8 +196,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                     proceeds = exit_premium * 100 * abs(position)
                     balance += proceeds
                     pnl = (exit_premium - entry_price) * 100 * abs(position)
-                    trades.append({'time': current_time, 'type': 'sell_put', 'price': exit_premium, 'qty': abs(position), 'pnl': pnl})
-                    print(f"[{current_time}] EXIT PUT  @ {exit_premium:.2f} | PnL: {pnl:.2f}")
+                    trades.append({'time': current_time_et, 'type': 'sell_put', 'price': exit_premium, 'qty': abs(position), 'pnl': pnl})
+                    print(f"[{current_time_et}] EXIT PUT  @ {exit_premium:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     option_contract = None
                     
@@ -197,9 +210,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                         balance -= premium * 100
                         position = 1
                         entry_price = premium
-                        option_contract = {'strike': strike, 'expiry_days': 7, 'entry_time': current_time, 'type': 'call'}
-                        trades.append({'time': current_time, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time}] FLIP CALL @ {premium:.2f} (Strk: {strike})")
+                        option_contract = {'strike': strike, 'expiry_days': 7, 'entry_time': current_time_utc, 'type': 'call'}
+                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
+                        print(f"[{current_time_et}] FLIP CALL @ {premium:.2f} (Strk: {strike})")
 
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
@@ -218,9 +231,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                         balance -= contract_cost
                         position = -1 # Negative indicates bearish
                         entry_price = premium
-                        option_contract = {'strike': strike, 'expiry_days': days_to_expiry, 'entry_time': current_time, 'type': 'put'}
-                        trades.append({'time': current_time, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time}] BUY PUT   @ {premium:.2f} (Strk: {strike}) | Vol: {sigma:.2f}")
+                        option_contract = {'strike': strike, 'expiry_days': days_to_expiry, 'entry_time': current_time_utc, 'type': 'put'}
+                        trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
+                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Strk: {strike}) | Vol: {sigma:.2f}")
                 
                 elif trade_type == "stock":
                     # Sell stock if held (handled below)
@@ -232,12 +245,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                     proceeds = position * price
                     balance += proceeds
                     pnl = (price - entry_price) * position
-                    trades.append({'time': current_time, 'type': 'sell_stock', 'price': price, 'qty': position, 'pnl': pnl})
-                    print(f"[{current_time}] SELL STOCK @ {price:.2f} | PnL: {pnl:.2f}")
+                    trades.append({'time': current_time_et, 'type': 'sell_stock', 'price': price, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] SELL STOCK @ {price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                 elif trade_type == "options" and option_contract['type'] == 'call':
                     # Sell to Close Call
-                    time_held = current_time - option_contract['entry_time']
+                    time_held = current_time_utc - option_contract['entry_time']
                     days_passed = time_held.total_seconds() / (24 * 3600)
                     T_remain = (option_contract['expiry_days'] - days_passed) / 365.0
                     sigma = current_vol if current_vol > 0 else 0.2
@@ -246,8 +259,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                     proceeds = exit_premium * 100 * position
                     balance += proceeds
                     pnl = (exit_premium - entry_price) * 100 * position
-                    trades.append({'time': current_time, 'type': 'sell_call', 'price': exit_premium, 'qty': position, 'pnl': pnl})
-                    print(f"[{current_time}] EXIT CALL @ {exit_premium:.2f} | PnL: {pnl:.2f}")
+                    trades.append({'time': current_time_et, 'type': 'sell_call', 'price': exit_premium, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] EXIT CALL @ {exit_premium:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     option_contract = None
                     
@@ -258,23 +271,28 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
                         balance -= premium * 100
                         position = -1
                         entry_price = premium
-                        option_contract = {'strike': strike, 'expiry_days': 7, 'entry_time': current_time, 'type': 'put'}
-                        trades.append({'time': current_time, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time}] FLIP PUT  @ {premium:.2f} (Strk: {strike})")
+                        option_contract = {'strike': strike, 'expiry_days': 7, 'entry_time': current_time_utc, 'type': 'put'}
+                        trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
+                        print(f"[{current_time_et}] FLIP PUT  @ {premium:.2f} (Strk: {strike})")
 
     # End of backtest - Mark to Market
     if position != 0:
         last_price = ltf_data.iloc[-1]['close']
+        last_time_utc = ltf_data.index[-1]
+        last_time_et = last_time_utc.astimezone(ET)
+        
         if trade_type == "stock":
             balance += position * last_price
+            trades.append({'time': last_time_et, 'type': 'mtm_stock', 'price': last_price, 'qty': position})
         elif trade_type == "options":
              if option_contract:
-                time_held = ltf_data.index[-1] - option_contract['entry_time']
+                time_held = last_time_utc - option_contract['entry_time']
                 days_passed = time_held.total_seconds() / (24 * 3600)
                 T_remain = max(0, (option_contract['expiry_days'] - days_passed) / 365.0)
                 sigma = htf_data.iloc[-1]['volatility']
                 exit_premium = black_scholes_price(last_price, option_contract['strike'], T_remain, 0.04, sigma, type=option_contract['type'])
                 balance += exit_premium * 100 * abs(position)
+                trades.append({'time': last_time_et, 'type': f'mtm_{option_contract["type"]}', 'price': exit_premium, 'qty': abs(position)})
         
     print("="*30)
     print(f"Backtest Complete ({trade_type.upper()}).")

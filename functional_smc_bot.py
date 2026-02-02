@@ -395,17 +395,22 @@ if __name__ == "__main__":
         
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
     
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("US/Eastern")
+
     while True:
         try:
             # 1. Check if market is open
             clock = trade_client.get_clock()
             if not clock.is_open:
-                print(f"Market is CLOSED. Next open: {clock.next_open}. Waiting 15 minutes...")
+                next_open_et = clock.next_open.astimezone(ET)
+                print(f"Market is CLOSED. Next open: {next_open_et}. Waiting 15 minutes...")
                 time.sleep(900) # Wait 15 minutes
                 continue
 
             # 2. Market is open, look for signals
-            print(f"Analyzing {target_symbol} at {clock.timestamp}...")
+            timestamp_et = clock.timestamp.astimezone(ET)
+            print(f"Analyzing {target_symbol} at {timestamp_et}...")
             sig = generate_signal(target_symbol)
             
             if sig:
