@@ -378,10 +378,21 @@ def place_trade(signal, symbol):
 # ================= MAIN LOOP =================
 
 import sys
+import argparse
 
 if __name__ == "__main__":
-    target_symbol = sys.argv[1] if len(sys.argv) > 1 else SYMBOL
-    print(f"Analyzing market for {target_symbol}...")
+    parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
+    parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
+    parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
+    
+    args = parser.parse_args()
+    target_symbol = args.symbol
+    
+    if args.options:
+        print("Overriding ENABLE_OPTIONS to True from command line.")
+        config.ENABLE_OPTIONS = True
+        
+    print(f"Analyzing market for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
     
     try:
         sig = generate_signal(target_symbol)

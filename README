@@ -37,14 +37,14 @@ python3.12 backtest.py QQQ
 
 # Run live trading
 ## Options
-Update ENABLE_OPTIONS to True in alpaca_config.py
+You can enable options trading by passing the `--options` flag:
 ```bash
-python3.12 functional_smc_bot.py QQQ 
-
+python3.12 functional_smc_bot.py QQQ --options
 ```
+Alternatively, update `ENABLE_OPTIONS` to `True` in `alpaca_config.py`.
 
 ## Stocks
-Update ENABLE_OPTIONS to False in alpaca_config.py
+Default behavior (or ensure `ENABLE_OPTIONS` is `False` in `alpaca_config.py`):
 ```bash
 python3.12 functional_smc_bot.py QQQ 
 ```
