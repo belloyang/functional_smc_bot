@@ -27,6 +27,9 @@ trade_client = config.trading_client
 
 # ================= DATA =================
 
+from alpaca.data.historical import OptionHistoricalDataClient
+option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+
 from datetime import datetime, timedelta
 
 def get_bars(symbol, timeframe, limit):
@@ -350,10 +353,6 @@ def place_trade(signal, symbol):
     
     print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held})")
 
-from alpaca.data.historical import OptionHistoricalDataClient
-option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
-
-# ... (Existing code) ...
 
     # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
@@ -560,6 +559,95 @@ def manage_option_expiry():
     except Exception as e:
         print(f"Error in manage_option_expiry: {e}")
 
+from alpaca.trading.requests import ReplaceOrderRequest
+
+def manage_trade_updates():
+    """
+    Monitors active trades and adjusts Stop Losses.
+    1. Break-Even: If Profit > 15%, move SL to Entry.
+    2. Profit Lock: If Profit > 30%, move SL to +15% Profit.
+    """
+    try:
+        positions = trade_client.get_all_positions()
+        for pos in positions:
+            symbol = pos.symbol
+            # Skip if we can't determine direction clearly (assuming Long for simplicity or checking side)
+            # Both Stock Long and Option Long (Call/Put) have side='long' in Position object typically
+            is_long = pos.side == 'long'
+            if not is_long: continue # Skip short management for MVP simplicity
+
+            entry_price = float(pos.avg_entry_price)
+            current_price = float(pos.current_price)
+            pl_pct = float(pos.unrealized_plpc)
+            
+            # Thresholds
+            BE_THRESHOLD = 0.15
+            LOCK_THRESHOLD = 0.30
+            
+            if pl_pct < BE_THRESHOLD:
+                continue
+                
+            # Find the existing Stop Loss Order
+            # Warning: This finds ANY open Stop/StopLimit sell order for this symbol.
+            # In a complex bot with multiple positions per symbol, this is risky. 
+            # But for this bot (one pos per symbol), it is safe.
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import OrderStatus, QueryOrderStatus
+            
+            orders_req = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                symbol=symbol,
+                side=OrderSide.SELL # Assuming we are closing a Long
+            )
+            open_orders = trade_client.get_orders(orders_req)
+            
+            stop_order = None
+            for o in open_orders:
+                # We look for STOP or STOP_LIMIT orders
+                if o.order_type in ['stop', 'stop_limit']:
+                    stop_order = o
+                    break
+            
+            if not stop_order:
+                continue
+                
+            current_stop = float(stop_order.stop_price) if stop_order.stop_price else 0.0
+            
+            # Logic: Move Stop UP only
+            new_stop = None
+            
+            # 2. Profit Lock (>30% gain -> Lock 15%)
+            if pl_pct > LOCK_THRESHOLD:
+                target_stop = entry_price * 1.15
+                if current_stop < target_stop:
+                    new_stop = target_stop
+                    print(f"💰 PROFIT LOCK: {symbol} is up {pl_pct*100:.1f}%. Moving SL to {new_stop:.2f} (+15%)")
+            
+            # 1. Break Even (>15% gain -> Move to Entry)
+            elif pl_pct > BE_THRESHOLD:
+                target_stop = entry_price
+                # Give it a tiny buffer so fees don't eat us? Entry * 1.005?
+                # Let's stick to raw entry for now.
+                if current_stop < target_stop:
+                    new_stop = target_stop
+                    print(f"🛡️ BREAK EVEN: {symbol} is up {pl_pct*100:.1f}%. Moving SL to Entry {new_stop:.2f}")
+
+            # Apply Update
+            if new_stop:
+                try:
+                    # We use replace_order
+                    # Note: For Bracket orders, replacing the Stop Leg is supported.
+                    replace_req = ReplaceOrderRequest(
+                         stop_price=round(new_stop, 2)
+                    )
+                    trade_client.replace_order(stop_order.id, replace_req)
+                    print(f"✅ Stop Loss Updated for {symbol}")
+                except Exception as e:
+                    print(f"❌ Failed to update Stop Loss for {symbol}: {e}")
+
+    except Exception as e:
+        print(f"Error in manage_trade_updates: {e}")
+
 # ================= MAIN LOOP =================
 
 import sys
@@ -585,8 +673,9 @@ if __name__ == "__main__":
 
     while True:
         try:
-            # 0. Check and Manage Expirations (Priority)
+            # 0. Maintenance Tasks
             manage_option_expiry()
+            manage_trade_updates() # <--- NEW Call
             
             # 1. Check if market is open
             clock = trade_client.get_clock()
