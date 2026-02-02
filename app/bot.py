@@ -270,6 +270,68 @@ def calculate_smart_quantity(price, stop_loss_price):
     
     return max(0, qty)
 
+# ================= HELPERS =================
+
+from alpaca.trading.requests import GetOptionContractsRequest
+from alpaca.trading.enums import AssetStatus, ContractType
+
+def get_best_option_contract(symbol, signal_type, known_price=None):
+    """
+    Finds the best option contract for the given signal.
+    """
+    try:
+        if known_price:
+             current_price = known_price
+        else:
+            current_price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
+            if current_price_df.empty:
+                print("Could not fetch current price for options.")
+                return None
+            current_price = current_price_df['close'].iloc[-1]
+            
+        now = datetime.now()
+        start_date = now + timedelta(days=2)
+        end_date = now + timedelta(days=14)
+        
+        contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
+        
+        req = GetOptionContractsRequest(
+            underlying_symbol=symbol,
+            status=AssetStatus.ACTIVE,
+            expiration_date_gte=start_date.date(),
+            expiration_date_lte=end_date.date(),
+            type=contract_type,
+            limit=100 
+        )
+        
+        print(f"DEBUG: Searching options for {symbol} | Type: {contract_type} | Range: {start_date.date()} to {end_date.date()}")
+        contracts = trade_client.get_option_contracts(req).option_contracts
+        
+        if not contracts:
+            print(f"No option contracts found for {symbol}")
+            return None
+            
+        contracts.sort(key=lambda x: x.expiration_date)
+        nearest_expiry = contracts[0].expiration_date
+        expiry_contracts = [c for c in contracts if c.expiration_date == nearest_expiry]
+        expiry_contracts.sort(key=lambda c: abs(float(c.strike_price) - current_price))
+        
+        return expiry_contracts[0]
+
+    except Exception as e:
+        print(f"Error getting option contract: {e}")
+        return None
+
+def get_current_position(symbol):
+    """
+    Fetches the current position for the given symbol.
+    Returns the Position object if found, else None.
+    """
+    try:
+        return trade_client.get_open_position(symbol)
+    except Exception:
+        return None
+
 def place_trade(signal, symbol):
     # Get latest price and ample history for Swing Point detection
     # We need enough history to find a swing point (e.g. 50-100 bars)
@@ -383,6 +445,61 @@ def place_trade(signal, symbol):
         else:
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
 
+
+import re
+
+def parse_option_expiry(symbol):
+    # Regex to capture YYMMDD from SPY251219C00500000
+    # Format: Root(up to 6 chars) + YYMMDD + Type(C/P) + Strike
+    match = re.search(r'[A-Z]+(\d{6})[CP]', symbol)
+    if match:
+        date_str = match.group(1)
+        return datetime.strptime(date_str, "%y%m%d")
+    return None
+
+def manage_option_expiry():
+    """
+    Checks all open option positions.
+    1. Critical (<= 1 Day): Force Close.
+    2. Stale (<= 3 Days): Decay Exit (2/3 time rule).
+    """
+    if not getattr(config, 'ENABLE_OPTIONS', False):
+        return
+        
+    try:
+        positions = trade_client.get_all_positions()
+        now = datetime.now()
+        
+        for pos in positions:
+            if pos.asset_class != 'us_option':
+                continue
+                
+            expiry = parse_option_expiry(pos.symbol)
+            if not expiry:
+                print(f"Could not parse expiry for {pos.symbol}, skipping.")
+                continue
+                
+            dte = (expiry - now).days
+            
+            # Logic:
+            # expiry is e.g. 2025-12-19 00:00:00.
+            # now is 2025-12-17 15:00:00.
+            # delta is ~1.4 days. .days returns 1.
+            
+            if dte <= 1:
+                print(f"⚠️ CRITICAL: {pos.symbol} expires in {dte} days! Force Closing.")
+                trade_client.close_position(pos.symbol)
+            elif dte <= 3:
+                print(f"⚠️ THETA DECAY: {pos.symbol} has {dte} days left (Stale). Closing to preserve value.")
+                trade_client.close_position(pos.symbol)
+            else:
+                # DEBUG log only occasionally?
+                # print(f"DEBUG: {pos.symbol} DTE: {dte} (Safe)")
+                pass
+
+    except Exception as e:
+        print(f"Error in manage_option_expiry: {e}")
+
 # ================= MAIN LOOP =================
 
 import sys
@@ -408,6 +525,9 @@ if __name__ == "__main__":
 
     while True:
         try:
+            # 0. Check and Manage Expirations (Priority)
+            manage_option_expiry()
+            
             # 1. Check if market is open
             clock = trade_client.get_clock()
             if not clock.is_open:
