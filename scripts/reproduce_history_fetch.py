@@ -2,7 +2,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 import datetime
-import alpaca_config as config
+import sys
+import os
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app import config
 
 def test_historical_fetch():
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)

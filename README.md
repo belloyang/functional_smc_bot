@@ -35,12 +35,12 @@ ALPACA_API_SECRET=your_secret
 # Run backtest
 ## Options
 ```bash
-python3.12 backtest.py QQQ --options
+python3.12 scripts/backtest.py QQQ --options
 ```
 
 ## Stocks
 ```bash
-python3.12 backtest.py QQQ
+python3.12 scripts/backtest.py QQQ
 ```
 
 
@@ -48,14 +48,14 @@ python3.12 backtest.py QQQ
 ## Options
 You can enable options trading by passing the `--options` flag:
 ```bash
-python3.12 functional_smc_bot.py QQQ --options
+python3.12 -m app.bot QQQ --options
 ```
-Alternatively, update `ENABLE_OPTIONS` to `True` in `alpaca_config.py`.
+Alternatively, update `ENABLE_OPTIONS` to `True` in `app/config.py`.
 
 ## Stocks
-Default behavior (or ensure `ENABLE_OPTIONS` is `False` in `alpaca_config.py`):
+Default behavior (or ensure `ENABLE_OPTIONS` is `False` in `app/config.py`):
 ```bash
-python3.12 functional_smc_bot.py QQQ 
+python3.12 -m app.bot QQQ 
 ```
 
 

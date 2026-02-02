@@ -6,7 +6,11 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
-import alpaca_config as config
+try:
+    from . import config
+except ImportError:
+    import config
+
 
 # ================= CONFIG =================
 

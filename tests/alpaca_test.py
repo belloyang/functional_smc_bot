@@ -2,9 +2,14 @@ from alpaca.trading import TradingClient
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 
-api_key = "PKGYMDJH2IQXKAR26DBWFXYPW7"
-api_secret = "7UKv2d3WfpyE2pxLRiZhNb8LkdZvLyp3bWn5g5z27REd"
-trading_client = TradingClient(api_key, api_secret, paper=True)
+import sys
+import os
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app import config
+
+trading_client = TradingClient(config.API_KEY, config.API_SECRET, paper=True)
 selected_tickers = [
     "SLV", "USAR", "TSLA", "AAPL",
     "MSFT", "NVDA", "AMZN", "GOOGL",

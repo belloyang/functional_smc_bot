@@ -1,5 +1,10 @@
-from functional_smc_bot import get_best_option_contract
-import alpaca_config as config
+import sys
+import os
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app.bot import get_best_option_contract
+from app import config
 
 def test_selection():
     symbol = config.SYMBOL

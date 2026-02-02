@@ -10,8 +10,14 @@ def norm_cdf(x):
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta, timezone
-import alpaca_config as config
-from functional_smc_bot import get_strategy_signal
+
+import sys
+import os
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app import config
+from app.bot import get_strategy_signal
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """

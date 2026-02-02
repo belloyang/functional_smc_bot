@@ -2,7 +2,12 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetOptionContractsRequest
 from alpaca.trading.enums import AssetStatus, AssetExchange
 from datetime import datetime, timedelta
-import alpaca_config as config
+import sys
+import os
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app import config
 
 def research_options():
     print("Connecting to Alpaca...")
