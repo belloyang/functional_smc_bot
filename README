@@ -21,7 +21,16 @@ TODO
 
 
 ## Configuration
-Update alpaca_config.py with your Alpaca API key and secret.
+Set your Alpaca API credentials as environment variables for security:
+```bash
+export ALPACA_API_KEY="your_key"
+export ALPACA_API_SECRET="your_secret"
+```
+Alternatively, create a `.env` file in the root directory (it is ignored by git):
+```text
+ALPACA_API_KEY=your_key
+ALPACA_API_SECRET=your_secret
+```
 
 # Run backtest
 ## Options

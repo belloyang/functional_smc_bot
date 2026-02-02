@@ -1,14 +1,42 @@
+import os
 from alpaca.trading import TradingClient
 
-API_KEY = "PKGYMDJH2IQXKAR26DBWFXYPW7"
-API_SECRET = "7UKv2d3WfpyE2pxLRiZhNb8LkdZvLyp3bWn5g5z27REd"
+def load_env(file_path=".env"):
+    """Simple helper to load .env variables without external dependencies."""
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    # Clean up key and value (remove spaces and quotes)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    os.environ[key] = value
+
+# Load environment variables from .env if it exists
+load_env()
+
+API_KEY = os.getenv("ALPACA_API_KEY")
+API_SECRET = os.getenv("ALPACA_API_SECRET")
+
+if not API_KEY or not API_SECRET:
+    print("WARNING: ALPACA_API_KEY or ALPACA_API_SECRET not found in environment variables.")
+
 BASE_URL = "https://paper-api.alpaca.markets"  # paper trading
 SYMBOL = "SPY" # default symbol
 TIMEFRAME_HTF = "15Min"
 TIMEFRAME_LTF = "1Min"
 
+# Note: TradingClient will fail if keys are None, but we catch it here
 trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
 
 RISK_PER_TRADE = 0.01  # 1%
-ACCOUNT_BALANCE = trading_client.get_account().equity
+try:
+    ACCOUNT_BALANCE = trading_client.get_account().equity
+except Exception:
+    ACCOUNT_BALANCE = 10000 # Fallback for local testing without keys
+
 ENABLE_OPTIONS = False # Set to True to trade options instead of shares
