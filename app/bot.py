@@ -350,15 +350,75 @@ def place_trade(signal, symbol):
     
     print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held})")
 
-    # ================= STOCK MODE (With Bracket Orders) =================
-    # Options mode skipped in this snippet logic for brevity as this function is getting long
-    # Should keep Options Logic? The user instruction implies checking app.bot status.
-    # We will keep Options logic structure but apply Bracket only to Stock for now as Options Brackets are complex.
-    
+from alpaca.data.historical import OptionHistoricalDataClient
+option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+
+# ... (Existing code) ...
+
+    # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
-        # ... (Existing Options Logic preserved structurally, mostly) ...
-        print("Options Bracket Orders not fully implemented in this update. Using simple entry.")
-        pass # Placeholder to indicate we focus on Stock Bracket below
+        if qty_held != 0:
+             print(f"Warning: Holding underlying shares ({qty_held}) while in Options Mode. Skipping new option entries to avoid mix-up.")
+             return
+
+        print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
+        contract = get_best_option_contract(symbol, signal)
+        
+        if contract:
+            trade_symbol = contract.symbol
+            # Check if we already hold THIS specific contract
+            contract_pos = get_current_position(trade_symbol)
+            if contract_pos and float(contract_pos.qty) > 0:
+                 print(f"Already hold {trade_symbol}. Holding.")
+                 return
+
+            # Fetch Current Option Price to calculate Brackets
+            from alpaca.data.requests import OptionLatestQuoteRequest
+            try:
+                # We need the quote to determine Entry Price approximation
+                quote_req = OptionLatestQuoteRequest(symbol_or_symbols=trade_symbol)
+                quote = option_data_client.get_option_latest_quote(quote_req)
+                
+                # Use Ask price as likely entry (buying)
+                entry_est = quote[trade_symbol].ask_price
+                if entry_est <= 0:
+                    print(f"Invalid option ask price {entry_est}. Skipping.")
+                    return
+                    
+                # Calculate Levels (-20% SL, +40% TP)
+                # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
+                sl_price = entry_est * 0.80
+                tp_price = entry_est * 1.40
+                
+                # Round to 2 decimals
+                sl_price = round(sl_price, 2)
+                tp_price = round(tp_price, 2)
+                
+                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+40%)")
+                
+                qty = 1 # MVP size
+                
+                sl_req = StopLossRequest(stop_price=sl_price)
+                tp_req = TakeProfitRequest(limit_price=tp_price)
+                
+                order = MarketOrderRequest(
+                    symbol=trade_symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    stop_loss=sl_req,
+                    take_profit=tp_req
+                )
+                
+                trade_client.submit_order(order)
+                print(f"✅ OPTION BRACKET SUBMITTED: {trade_symbol}")
+                return
+
+            except Exception as e:
+                print(f"❌ Option Order failed: {e}")
+                print("Falling back to share trading...")
+        else:
+             print("Could not find suitable option contract. Falling back to shares.")
         
     # --- STOCK TRADING LOGIC ---
     
