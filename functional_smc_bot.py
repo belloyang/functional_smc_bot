@@ -228,9 +228,131 @@ def calculate_position_size(price):
 
 # ================= EXECUTION =================
 
+# ================= EXECUTION =================
+
+from alpaca.trading.requests import GetOptionContractsRequest
+from alpaca.trading.enums import AssetStatus, ContractType
+from datetime import datetime, timedelta
+
+def get_best_option_contract(symbol, signal_type, known_price=None):
+    """
+    Finds the best option contract for the given signal.
+    Criteria:
+    - Type: CALL for 'buy', PUT for 'sell'
+    - Expiration: 2-7 days out (Weekly)
+    - Strike: At-The-Money (closest to current price)
+    """
+    # Get current price
+    try:
+        if known_price:
+             current_price = known_price
+        else:
+            current_price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
+            if current_price_df.empty:
+                print("Could not fetch current price for options.")
+                return None
+            current_price = current_price_df['close'].iloc[-1]
+    except Exception as e:
+        print(f"Error fetching price for options: {e}")
+        return None
+        
+        now = datetime.now()
+        # Look for expirations between 2 and 14 days out to ensure we find something
+        start_date = now + timedelta(days=2)
+        end_date = now + timedelta(days=14)
+        
+        contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
+        
+        req = GetOptionContractsRequest(
+            underlying_symbol=symbol,
+            status=AssetStatus.ACTIVE,
+            expiration_date_gte=start_date.date(),
+            expiration_date_lte=end_date.date(),
+            type=contract_type,
+            limit=100 
+        )
+        
+        print(f"DEBUG: Searching options for {symbol} | Type: {contract_type} | Range: {start_date.date()} to {end_date.date()}")
+        contracts = trade_client.get_option_contracts(req).option_contracts
+        print(f"DEBUG: Found {len(contracts)} raw contracts")
+        
+        if not contracts:
+            print(f"No option contracts found for {symbol}")
+            return None
+            
+        # Filter and Sort
+        # 1. Sort by expiration (nearest first)
+        # 2. Sort by strike difference to current price
+        
+        # We want the nearest expiration that isn't today/tomorrow (handled by query date range)
+        # Group by expiration? Or just sort all by distance to now, then distance to price.
+        
+        # Let's pick the closest expiration first
+        contracts.sort(key=lambda x: x.expiration_date)
+        nearest_expiry = contracts[0].expiration_date
+        
+        # Filter for this expiry
+        expiry_contracts = [c for c in contracts if c.expiration_date == nearest_expiry]
+        
+        # Find ATM strike
+        # Sort by abs(strike - price)
+        expiry_contracts.sort(key=lambda c: abs(float(c.strike_price) - current_price))
+        
+        best_contract = expiry_contracts[0]
+        print(f"Selected Contract: {best_contract.symbol} | Strike: {best_contract.strike_price} | Exp: {best_contract.expiration_date}")
+        return best_contract
+
+    except Exception as e:
+        print(f"Error getting option contract: {e}")
+        return None
+
 def place_trade(signal, symbol):
     # Get latest price
-    price = get_bars(symbol, "1Min", 1)['close'].iloc[-1]
+    # Fix: Use TimeFrame object
+    price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
+    if price_df.empty:
+        print("Could not fetch price for placement.")
+        return
+    price = price_df['close'].iloc[-1]
+    
+    # Check if Options Trading is Enabled
+    if getattr(config, 'ENABLE_OPTIONS', False):
+        print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
+        contract = get_best_option_contract(symbol, signal)
+        
+        if contract:
+            # For Options, the symbol to trade IS the contract symbol
+            trade_symbol = contract.symbol
+            # MVP: Trade 1 contract
+            qty = 1 
+            print(f"Placing OPTION order: {signal.upper()} {qty}x {trade_symbol}")
+            
+            # Note: For options, we typically BUY to Open.
+            # If signal is 'buy' (bullish) -> Buy Call
+            # If signal is 'sell' (bearish) -> Buy Put (Bot logic generates 'sell' signal for bearish bias)
+            # So in both cases side is BUY? 
+            # WAIT. The bot generates 'sell' signal. 
+            # get_best_option_contract handles the type (PUT).
+            # So we just need to BUY the contract (Long Call or Long Put).
+            side = OrderSide.BUY 
+            
+            try:
+                order = MarketOrderRequest(
+                    symbol=trade_symbol,
+                    qty=qty,
+                    side=side,
+                    time_in_force=TimeInForce.DAY
+                )
+                trade_client.submit_order(order)
+                print(f"✅ OPTION ORDER SUBMITTED: {trade_symbol}")
+                return
+            except Exception as e:
+                print(f"❌ Option Order failed: {e}")
+                print("Falling back to share trading...")
+        else:
+             print("Could not find suitable option contract. Falling back to shares.")
+
+    # FALLBACK / STANDARD SHARE TRADING
     qty = calculate_position_size(price)
     
     if qty <= 0:

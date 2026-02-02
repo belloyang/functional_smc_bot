@@ -11,3 +11,4 @@ trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
 
 RISK_PER_TRADE = 0.01  # 1%
 ACCOUNT_BALANCE = trading_client.get_account().equity
+ENABLE_OPTIONS = False # Set to True to trade options instead of shares
