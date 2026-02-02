@@ -379,6 +379,7 @@ def place_trade(signal, symbol):
 
 import sys
 import argparse
+import time
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
@@ -392,14 +393,32 @@ if __name__ == "__main__":
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
         
-    print(f"Analyzing market for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
+    print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
     
-    try:
-        sig = generate_signal(target_symbol)
-        if sig:
-            print(f"Signal detected: {sig}")
-            place_trade(sig, target_symbol)
-        else:
-            print("No signal detected.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    while True:
+        try:
+            # 1. Check if market is open
+            clock = trade_client.get_clock()
+            if not clock.is_open:
+                print(f"Market is CLOSED. Next open: {clock.next_open}. Waiting 15 minutes...")
+                time.sleep(900) # Wait 15 minutes
+                continue
+
+            # 2. Market is open, look for signals
+            print(f"Analyzing {target_symbol} at {clock.timestamp}...")
+            sig = generate_signal(target_symbol)
+            
+            if sig:
+                print(f"🚀 Signal detected: {sig.upper()}!")
+                place_trade(sig, target_symbol)
+                # After a trade, sleep for 5 minutes to avoid rapid double-entry
+                print("Trade placed. Cooling down for 5 minutes...")
+                time.sleep(300)
+            else:
+                # No signal, wait 1 minute before checking again
+                time.sleep(60)
+
+        except Exception as e:
+            print(f"An error occurred in the main loop: {e}")
+            print("Restarting loop in 60 seconds...")
+            time.sleep(60)
