@@ -18,7 +18,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import get_strategy_signal
+from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -123,8 +123,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     position = 0 # Quantity (Shares or Contracts)
     entry_price = 0 # Stock price or Option premium per share
     
-    # Option specific state
-    option_contract = None # {'strike': K, 'expiry': date, 'type': 'call'/'put', 'bars_to_expiry_start': N}
+    # Trade specific state (Stock or Option)
+    active_trade = None # {'strike': K, 'expiry': date, 'type': 'call'/'put'/'stock', ...}
     
     equity_curve = []
     trades = []
@@ -170,71 +170,100 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         price = current_bar['close']
         
-        # --- OPTIONS PRICING SIMULATION ---
+        # --- RISK CHECKS (Before Signal) ---
         current_option_price = 0
-        if position != 0 and trade_type == "options" and option_contract:
-            time_held = current_time_utc - option_contract['entry_time']
-            days_passed = time_held.total_seconds() / (24 * 3600)
-            T_remain = max(0.0001, (option_contract['expiry_days'] - days_passed) / 365.0)
-            sigma = current_vol if current_vol > 0 else 0.2
-            
-            # Recalculate Option Value
-            current_option_price = black_scholes_price(price, option_contract['strike'], T_remain, 0.04, sigma, type=option_contract['type'])
-            
-            # --- RISK CHECKS (Before Signal) ---
-            
-            # 1. Stop Loss Hit
-            if current_option_price <= option_contract['stop_loss']:
-                exit_price = option_contract['stop_loss'] # In simulation, we slip to SL price
-                proceeds = exit_price * 100 * abs(position)
-                balance += proceeds
-                pnl = (exit_price - entry_price) * 100 * abs(position)
-                exit_type = f"stop_loss_{option_contract['type']}"
-                trades.append({'time': current_time_et, 'type': exit_type, 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
-                print(f"[{current_time_et}] 🛑 STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                position = 0
-                option_contract = None
-                continue # Trade closed, next bar
+        if position != 0 and active_trade:
+            if trade_type == "stock":
+                # 1. Stop Loss Hit
+                if price <= active_trade['stop_loss']:
+                    exit_price = active_trade['stop_loss']
+                    proceeds = position * exit_price
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * position
+                    trades.append({'time': current_time_et, 'type': 'stop_loss_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    position = 0
+                    active_trade = None
+                    continue
 
-            # 2. Take Profit Hit
-            if current_option_price >= option_contract['take_profit']:
-                exit_price = option_contract['take_profit']
-                proceeds = exit_price * 100 * abs(position)
-                balance += proceeds
-                pnl = (exit_price - entry_price) * 100 * abs(position)
-                exit_type = f"take_profit_{option_contract['type']}"
-                trades.append({'time': current_time_et, 'type': exit_type, 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
-                print(f"[{current_time_et}] 🎯 TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                position = 0
-                option_contract = None
-                continue
+                # 2. Take Profit Hit
+                if price >= active_trade['take_profit']:
+                    exit_price = active_trade['take_profit']
+                    proceeds = position * exit_price
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * position
+                    trades.append({'time': current_time_et, 'type': 'take_profit_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    position = 0
+                    active_trade = None
+                    continue
+
+                # 3. Active Management
+                pl_pct = (price - entry_price) / entry_price
+                if pl_pct > 0.15 and active_trade['stop_loss'] < entry_price:
+                    active_trade['stop_loss'] = entry_price
+                    print(f"[{current_time_et}] 🛡️ STOCK MOVED SL TO BE ({entry_price:.2f})")
+                if pl_pct > 0.30:
+                    lock_price = entry_price * 1.15
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 STOCK LOCKED PROFIT ({lock_price:.2f})")
+
+            elif trade_type == "options":
+                time_held = current_time_utc - active_trade['entry_time']
+                days_passed = time_held.total_seconds() / (24 * 3600)
+                T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                sigma = current_vol if current_vol > 0 else 0.2
                 
-            # 3. Active Management (Update Stops)
-            unrealized_pl_pct = (current_option_price - entry_price) / entry_price
-            
-            # Rule A: Break-Even (>15% Profit)
-            if unrealized_pl_pct > 0.15 and option_contract['stop_loss'] < entry_price:
-                option_contract['stop_loss'] = entry_price
-                print(f"[{current_time_et}] 🛡️ MOVED SL TO BE ({entry_price:.2f})")
+                # Recalculate Option Value
+                current_option_price = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
                 
-            # Rule B: Profit Lock (>30% Profit -> Lock 15%)
-            if unrealized_pl_pct > 0.30:
-                lock_price = entry_price * 1.15
-                if option_contract['stop_loss'] < lock_price:
-                    option_contract['stop_loss'] = lock_price
-                    print(f"[{current_time_et}] 💰 LOCKED PROFIT ({lock_price:.2f})")
-            
-            # 4. Expiry Guard (<1 Day left)
-            if T_remain * 365.0 < 1.0:
-                 exit_price = current_option_price
-                 proceeds = exit_price * 100 * abs(position)
-                 balance += proceeds
-                 pnl = (exit_price - entry_price) * 100 * abs(position)
-                 trades.append({'time': current_time_et, 'type': 'expiry_close', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
-                 print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                 position = 0
-                 option_contract = None
-                 continue
+                # 1. Stop Loss Hit
+                if current_option_price <= active_trade['stop_loss']:
+                    exit_price = active_trade['stop_loss']
+                    proceeds = exit_price * 100 * abs(position)
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * 100 * abs(position)
+                    trades.append({'time': current_time_et, 'type': f"stop_loss_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                    print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    position = 0
+                    active_trade = None
+                    continue
+
+                # 2. Take Profit Hit
+                if current_option_price >= active_trade['take_profit']:
+                    exit_price = active_trade['take_profit']
+                    proceeds = exit_price * 100 * abs(position)
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * 100 * abs(position)
+                    trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                    print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    position = 0
+                    active_trade = None
+                    continue
+                    
+                # 3. Active Management
+                pl_pct = (current_option_price - entry_price) / entry_price
+                if pl_pct > 0.15 and active_trade['stop_loss'] < entry_price:
+                    active_trade['stop_loss'] = entry_price
+                    print(f"[{current_time_et}] 🛡️ OPTION MOVED SL TO BE ({entry_price:.2f})")
+                if pl_pct > 0.30:
+                    lock_price = entry_price * 1.15
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION LOCKED PROFIT ({lock_price:.2f})")
+                
+                # 4. Expiry Guard (Sync with bot.py: <= 3 days)
+                if T_remain * 365.0 <= 3.0:
+                     exit_price = current_option_price
+                     proceeds = exit_price * 100 * abs(position)
+                     balance += proceeds
+                     pnl = (exit_price - entry_price) * 100 * abs(position)
+                     trades.append({'time': current_time_et, 'type': 'expiry_close', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                     print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                     position = 0
+                     active_trade = None
+                     continue
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
@@ -242,156 +271,168 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if position == 0:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
-                    qty = int(balance * 0.01 / (price * 0.005))
+                    # Determine SL/TP (Sync with bot.py)
+                    swing_low = get_last_swing_low(ltf_slice, window=5)
+                    if swing_low and swing_low < price:
+                        sl = swing_low
+                    else:
+                        sl = price * 0.995 # Fallback 0.5%
+                    
+                    risk_dist = price - sl
+                    tp = price + (risk_dist * 2.0)
+                    
+                    # Calculate Qty based on Risk (1% of balance)
+                    risk_amt = balance * 0.01
+                    qty = int(risk_amt / risk_dist) if risk_dist > 0 else 0
+                    
                     if qty > 0:
                         cost = qty * price
                         balance -= cost
                         position = qty
                         entry_price = price
-                        trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty})
-                        print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty}")
-                
+
+                        # Store trade metadata for management
+                        active_trade = {
+                            'type': 'stock',
+                            'stop_loss': sl,
+                            'take_profit': tp,
+                            'entry_time': current_time_utc
+                        }
+
+                        trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty, 'sl': sl, 'tp': tp})
+                        print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty} | SL: {sl:.2f} | TP: {tp:.2f}")
+
                 elif trade_type == "options":
                     strike = round(price)
                     days_to_expiry = 7
                     T = days_to_expiry / 365.0
-                    r = 0.04
                     sigma = current_vol if current_vol > 0 else 0.2
-                    premium = black_scholes_price(price, strike, T, r, sigma, type='call')
+                    premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
-                    
+
                     if balance >= contract_cost:
                         balance -= contract_cost
                         position = 1
                         entry_price = premium
-                        
-                        # Set SL/TP
-                        sl = premium * 0.80
-                        tp = premium * 1.40
-                        
-                        option_contract = {
-                            'strike': strike, 
-                            'expiry_days': days_to_expiry, 
-                            'entry_time': current_time_utc, 
-                            'type': 'call',
-                            'stop_loss': sl,
-                            'take_profit': tp
-                        }
-                        
-                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Strk: {strike}) | SL: {sl:.2f} | TP: {tp:.2f}")
 
-            elif position < 0 or (trade_type == "options" and option_contract and option_contract['type'] == 'put'):
-                # Exit Bearish Position due to Signal Flip
+                        active_trade = {
+                            'strike': strike,
+                            'expiry_days': days_to_expiry,
+                            'entry_time': current_time_utc,
+                            'type': 'call',
+                            'stop_loss': premium * 0.80, # -20%
+                            'take_profit': premium * 1.40 # +40%
+                        }
+
+                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
+                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+
+            elif position < 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'put'):
+                # Exit Bearish Position due to Bullish Signal Flip
                 if trade_type == "stock":
-                    # (Stock doesn't support short in this script yet, but for logic consistency)
+                    # Stock shorting not simulated
                     pass
                 elif trade_type == "options":
-                    exit_price = current_option_price # Calculated above
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    exit_price = current_option_price
+                    if exit_price == 0: # If we just entered or logic skipped BS calc
+                        time_held = current_time_utc - active_trade['entry_time']
+                        days_passed = time_held.total_seconds() / (24 * 3600)
+                        T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                        exit_price = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type='put')
+
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_put', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT PUT @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
-                    option_contract = None
-                    
-                    # Immediate Entry Logic for Flip?
-                    # For simulation simplicity, we wait for next bar to enter to avoid complex state updates in one loop.
-                    # or simply copy entry logic here. Let's wait.
+                    active_trade = None
 
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
             if position == 0:
-                # Enter Bearish (Put)
+                # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
                     days_to_expiry = 7
-                    T = days_to_expiry / 365.0
-                    r = 0.04
                     sigma = current_vol if current_vol > 0 else 0.2
-                    premium = black_scholes_price(price, strike, T, r, sigma, type='put')
+                    premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
-                    
+
                     if balance >= contract_cost:
                         balance -= contract_cost
-                        position = -1 # Negative for tracking direction conceptually, though qty is 1 contract
+                        position = -1 # Negative denotes Put for logic
                         entry_price = premium
-                        
-                        # Set SL/TP
-                        sl = premium * 0.80
-                        tp = premium * 1.40
-                        
-                        option_contract = {
-                            'strike': strike, 
-                            'expiry_days': days_to_expiry, 
-                            'entry_time': current_time_utc, 
+
+                        active_trade = {
+                            'strike': strike,
+                            'expiry_days': days_to_expiry,
+                            'entry_time': current_time_utc,
                             'type': 'put',
-                            'stop_loss': sl,
-                            'take_profit': tp
+                            'stop_loss': premium * 0.80,
+                            'take_profit': premium * 1.40
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Strk: {strike}) | SL: {sl:.2f} | TP: {tp:.2f}")
-                
-                elif trade_type == "stock":
-                    # Sell stock if held (handled below)
-                    pass
+                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
 
-            elif position > 0 or (trade_type == "options" and option_contract and option_contract['type'] == 'call'):
-                # Exit Bullish Position due to Signal Flip
+            elif position > 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'call'):
+                # Exit Bullish Position due to Bearish Signal Flip
                 if trade_type == "stock":
-                    proceeds = position * price
-                    balance += proceeds
+                    balance += position * price
                     pnl = (price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'sell_stock', 'price': price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] SELL STOCK @ {price:.2f} | PnL: {pnl:.2f}")
                     position = 0
+                    active_trade = None
                 elif trade_type == "options":
                     exit_price = current_option_price
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    if exit_price == 0:
+                        time_held = current_time_utc - active_trade['entry_time']
+                        days_passed = time_held.total_seconds() / (24 * 3600)
+                        T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                        exit_price = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type='call')
+
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_call', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT CALL @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
-                    option_contract = None
+                    active_trade = None
 
         # --- EQUITY TRACKING (END OF BAR) ---
         current_equity = balance
-        if position != 0:
+        if position != 0 and active_trade:
             if trade_type == "stock":
                 current_equity += position * price
-            elif trade_type == "options" and option_contract:
-                # We need to ensure current_option_price is available or calculated
-                time_held_curr = current_time_utc - option_contract['entry_time']
-                days_passed_curr = time_held_curr.total_seconds() / (24 * 3600)
-                T_remain_curr = max(0.0001, (option_contract['expiry_days'] - days_passed_curr) / 365.0)
-                # Use current_vol if it was calculated in the risk checks, else fallback
-                sigma_curr = current_vol if 'current_vol' in locals() and current_vol > 0 else 0.2
-                tracking_premium = black_scholes_price(price, option_contract['strike'], T_remain_curr, 0.04, sigma_curr, type=option_contract['type'])
+            elif trade_type == "options":
+                time_held = current_time_utc - active_trade['entry_time']
+                days_passed = time_held.total_seconds() / (24 * 3600)
+                T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                tracking_premium = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type=active_trade['type'])
                 current_equity += abs(position) * tracking_premium * 100
-        
+
         equity_curve.append({'time': current_time_et, 'balance': current_equity})
 
     # End of backtest - Mark to Market
-    if position != 0:
+    if position != 0 and active_trade:
         last_price = ltf_data.iloc[-1]['close']
         last_time_utc = ltf_data.index[-1]
         last_time_et = last_time_utc.astimezone(ET)
-        
+
         if trade_type == "stock":
             balance += position * last_price
             trades.append({'time': last_time_et, 'type': 'mtm_stock', 'price': last_price, 'qty': position})
         elif trade_type == "options":
-             if option_contract:
-                time_held = last_time_utc - option_contract['entry_time']
-                days_passed = time_held.total_seconds() / (24 * 3600)
-                T_remain = max(0, (option_contract['expiry_days'] - days_passed) / 365.0)
-                sigma = htf_data.iloc[-1]['volatility']
-                exit_premium = black_scholes_price(last_price, option_contract['strike'], T_remain, 0.04, sigma, type=option_contract['type'])
-                balance += exit_premium * 100 * abs(position)
-                trades.append({'time': last_time_et, 'type': f'mtm_{option_contract["type"]}', 'price': exit_premium, 'qty': abs(position)})
-        
+            time_held = last_time_utc - active_trade['entry_time']
+            days_passed = time_held.total_seconds() / (24 * 3600)
+            T_remain = max(0, (active_trade['expiry_days'] - days_passed) / 365.0)
+            # Use last available volatility
+            sigma = htf_data.iloc[-1]['volatility']
+            exit_premium = black_scholes_price(last_price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
+            balance += exit_premium * 100 * abs(position)
+            trades.append({'time': last_time_et, 'type': f'mtm_{active_trade["type"]}', 'price': exit_premium, 'qty': abs(position)})
+        position = 0
+        active_trade = None
+
     print("="*30)
     print(f"Backtest Complete ({trade_type.upper()}).")
     print(f"Initial Balance: ${initial_balance}")
