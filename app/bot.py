@@ -300,7 +300,7 @@ def get_best_option_contract(symbol, signal_type, known_price=None):
         contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
         
         req = GetOptionContractsRequest(
-            underlying_symbol=symbol,
+            underlying_symbols=[symbol],
             status=AssetStatus.ACTIVE,
             expiration_date_gte=start_date.date(),
             expiration_date_lte=end_date.date(),
@@ -360,57 +360,64 @@ def place_trade(signal, symbol):
     price = price_df['close'].iloc[-1]
     last_close = price # Current price estimate
     
-    # 1. Check for Existing Position
-    current_position = get_current_position(symbol)
-    qty_held = float(current_position.qty) if current_position else 0
-    side_held = current_position.side if current_position else None 
-    
-    print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held})")
-
-
-    # 1. Global Position Cleanup (Cross-Asset Signal Flip)
+    # 1. Fetch CURRENT state for the base symbol and all related contracts
+    all_positions = []
     try:
         all_positions = trade_client.get_all_positions()
-        for pos in all_positions:
-            if not pos.symbol.startswith(symbol): continue
-            
-            # Identify if it's the underlying or an option
-            is_stock = (pos.asset_class.value == 'us_equity' and pos.symbol == symbol)
-            is_option = (pos.asset_class.value == 'us_option')
-            
-            # Identify Bias
-            is_bullish = False
-            if is_stock:
-                is_bullish = (pos.side == PositionSide.LONG)
-            elif is_option:
-                # Parse for C/P
-                m = re.search(r'\d{6}([CP])\d{8}', pos.symbol)
-                is_bullish = (m and m.group(1) == 'C')
-
-            # Conflict Detection: Close if signal is opposite of current holding bias
-            if (signal == "buy" and not is_bullish) or (signal == "sell" and is_bullish):
-                print(f"🔄 CROSS-ASSET CLEANUP: Closing {pos.symbol} bias conflict with {signal.upper()} signal.")
-                try:
-                    cancel_all_orders_for_symbol(pos.symbol)
-                    trade_client.close_position(pos.symbol)
-                except Exception as close_err:
-                    print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
     except Exception as e:
-        print(f"⚠️ Cleanup warning: {e}")
+        print(f"❌ Error fetching positions: {e}")
+        return
 
-    # 2. Final State Check before Entry
-    # Re-fetch positions to be 100% sure what remains after cleanup calls
-    # Note: close_position is technically async, but we treat it as done for logic flow.
     qty_held = 0
+    side_held = None
     any_options_held = False
-    all_pos_after = trade_client.get_all_positions()
-    for p in all_pos_after:
+
+    for p in all_positions:
         if not p.symbol.startswith(symbol): continue
         if p.asset_class.value == 'us_equity' and p.symbol == symbol:
             qty_held = float(p.qty)
             side_held = p.side
         if p.asset_class.value == 'us_option':
             any_options_held = True
+
+    print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held}) | Options: {any_options_held}")
+
+    # 2. Global Position Cleanup (Cross-Asset Signal Flip)
+    # We loop through our cached 'all_positions' and fire close orders for conflicts
+    for pos in all_positions:
+        if not pos.symbol.startswith(symbol): continue
+        
+        # Identify if it's the underlying or an option
+        is_stock = (pos.asset_class.value == 'us_equity' and pos.symbol == symbol)
+        is_option = (pos.asset_class.value == 'us_option')
+        
+        # Identify Bias
+        is_bullish = False
+        if is_stock:
+            is_bullish = (pos.side == PositionSide.LONG)
+        elif is_option:
+            m = re.search(r'\d{6}([CP])\d{8}', pos.symbol)
+            is_bullish = (m and m.group(1) == 'C')
+
+        # Conflict Detection: Close if signal is opposite of current holding bias
+        if (signal == "buy" and not is_bullish) or (signal == "sell" and is_bullish):
+            print(f"🔄 CROSS-ASSET CLEANUP: Closing {pos.symbol} bias conflict with {signal.upper()} signal.")
+            try:
+                cancel_all_orders_for_symbol(pos.symbol)
+                trade_client.close_position(pos.symbol)
+                # UPDATE LOCAL STATE IMMEDIATELY (Treat as closed for logic follow-through)
+                if is_stock:
+                    qty_held = 0
+                    side_held = None
+                if is_option:
+                    # Caution: This assumes we closed ALL options. 
+                    # If we had multiple and only closed one, this would need more precision.
+                    # But for this bot's MVP, we only ever open one contract.
+                    any_options_held = False
+            except Exception as close_err:
+                print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
+
+
 
     # 3. Mix-up Guards (Prevent holding both Stock and Options for same symbol)
     if getattr(config, 'ENABLE_OPTIONS', False):
