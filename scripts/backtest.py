@@ -40,11 +40,19 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock"):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0):
     if symbol is None:
         symbol = config.SYMBOL
         
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
+    
+    # 1. Fetch Data
+    # ... (Data fetching code omitted for brevity as it is unchanged) ...
+    # Note: replace_file_content replaces contiguous blocks. I need to be careful not to delete the data fetching block if I bridge the gap.
+    # Actually, the user asked to update "initial balance and days_back". 
+    # I will replace the signature line and the hardcoded balance line separately or in a large block if safe.
+    # It is safer here to do two replaces or one large block if I know the content.
+    # I'll just change the signature line first.
     
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
@@ -109,7 +117,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
     print(f"Data loaded. HTF: {len(htf_data)} bars, LTF: {len(ltf_data)} bars.")
 
     # 2. Simulation Loop
-    initial_balance = 10000.0 
     
     balance = initial_balance
     position = 0 # Quantity (Shares or Contracts)
@@ -380,7 +387,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("symbol", nargs="?", default=config.SYMBOL, help="Symbol to backtest")
     parser.add_argument("--options", action="store_true", help="Run backtest with Options instead of Stock")
+    parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
+    parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
+    
     args = parser.parse_args()
     
     mode = "options" if args.options else "stock"
-    run_backtest(symbol=args.symbol, trade_type=mode)
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance)

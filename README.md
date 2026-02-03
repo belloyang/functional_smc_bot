@@ -35,13 +35,18 @@ ALPACA_API_SECRET=your_secret
 # Run backtest
 ## Options
 ```bash
-python3.12 scripts/backtest.py QQQ --options
+python3.12 scripts/backtest.py QQQ --options --days 30 --balance 10000
 ```
 
 ## Stocks
 ```bash
-python3.12 scripts/backtest.py QQQ
+python3.12 scripts/backtest.py QQQ --days 30 --balance 10000
 ```
+
+### Parameters
+- `--days`: Number of days to backtest (default: 30)
+- `--balance`: Initial account balance (default: 10000.0)
+- `--options`: Run with options simulation instead of stock
 
 
 # Run live trading
