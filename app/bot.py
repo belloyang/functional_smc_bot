@@ -369,7 +369,6 @@ def place_trade(signal, symbol):
 
 
     # 1. Global Position Cleanup (Cross-Asset Signal Flip)
-    any_options_held = False
     try:
         all_positions = trade_client.get_all_positions()
         for pos in all_positions:
@@ -379,8 +378,6 @@ def place_trade(signal, symbol):
             is_stock = (pos.asset_class.value == 'us_equity' and pos.symbol == symbol)
             is_option = (pos.asset_class.value == 'us_option')
             
-            if is_option: any_options_held = True
-
             # Identify Bias
             is_bullish = False
             if is_stock:
@@ -396,17 +393,26 @@ def place_trade(signal, symbol):
                 try:
                     cancel_all_orders_for_symbol(pos.symbol)
                     trade_client.close_position(pos.symbol)
-                    if is_stock: 
-                        qty_held = 0
-                        side_held = None
-                    if is_option:
-                        any_options_held = False
                 except Exception as close_err:
                     print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
     except Exception as e:
         print(f"⚠️ Cleanup warning: {e}")
 
-    # 2. Mix-up Guards (Prevent holding both Stock and Options for same symbol)
+    # 2. Final State Check before Entry
+    # Re-fetch positions to be 100% sure what remains after cleanup calls
+    # Note: close_position is technically async, but we treat it as done for logic flow.
+    qty_held = 0
+    any_options_held = False
+    all_pos_after = trade_client.get_all_positions()
+    for p in all_pos_after:
+        if not p.symbol.startswith(symbol): continue
+        if p.asset_class.value == 'us_equity' and p.symbol == symbol:
+            qty_held = float(p.qty)
+            side_held = p.side
+        if p.asset_class.value == 'us_option':
+            any_options_held = True
+
+    # 3. Mix-up Guards (Prevent holding both Stock and Options for same symbol)
     if getattr(config, 'ENABLE_OPTIONS', False):
         if qty_held != 0:
              print(f"Warning: Holding underlying shares ({qty_held}) while in Options Mode. Skipping new option entries to avoid mix-up.")
@@ -562,7 +568,6 @@ def place_trade(signal, symbol):
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
 
 
-import re
 
 def parse_option_expiry(symbol):
     # Regex to capture YYMMDD from SPY251219C00500000
