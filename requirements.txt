@@ -4,3 +4,4 @@ numpy<=2.2.0
 pandas-ta
 python-dotenv
 scipy
+matplotlib

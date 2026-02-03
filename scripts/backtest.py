@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 # from scipy.stats import norm 
 import math
+import matplotlib.pyplot as plt
 from alpaca.data.historical import StockHistoricalDataClient
 
 def norm_cdf(x):
@@ -125,10 +126,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # Option specific state
     option_contract = None # {'strike': K, 'expiry': date, 'type': 'call'/'put', 'bars_to_expiry_start': N}
     
+    equity_curve = []
     trades = []
     print(f"Initial balance: {balance}")
     
     start_idx = 400 # Warmup for vol and indicators
+    equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
@@ -353,6 +356,23 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     position = 0
                     option_contract = None
 
+        # --- EQUITY TRACKING (END OF BAR) ---
+        current_equity = balance
+        if position != 0:
+            if trade_type == "stock":
+                current_equity += position * price
+            elif trade_type == "options" and option_contract:
+                # We need to ensure current_option_price is available or calculated
+                time_held_curr = current_time_utc - option_contract['entry_time']
+                days_passed_curr = time_held_curr.total_seconds() / (24 * 3600)
+                T_remain_curr = max(0.0001, (option_contract['expiry_days'] - days_passed_curr) / 365.0)
+                # Use current_vol if it was calculated in the risk checks, else fallback
+                sigma_curr = current_vol if 'current_vol' in locals() and current_vol > 0 else 0.2
+                tracking_premium = black_scholes_price(price, option_contract['strike'], T_remain_curr, 0.04, sigma_curr, type=option_contract['type'])
+                current_equity += abs(position) * tracking_premium * 100
+        
+        equity_curve.append({'time': current_time_et, 'balance': current_equity})
+
     # End of backtest - Mark to Market
     if position != 0:
         last_price = ltf_data.iloc[-1]['close']
@@ -379,6 +399,26 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     if initial_balance > 0:
         print(f"Return:          {((balance - initial_balance)/initial_balance)*100:.2f}%")
     print(f"Total Trades:    {len(trades)}")
+    
+    # --- VISUALIZATION ---
+    if equity_curve:
+        df_equity = pd.DataFrame(equity_curve)
+        df_equity.set_index('time', inplace=True)
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(df_equity.index, df_equity['balance'], label='Account Equity', color='#2ca02c')
+        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] >= initial_balance), color='#2ca02c', alpha=0.3)
+        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] < initial_balance), color='#d62728', alpha=0.3)
+        
+        plt.title(f"SMC Bot Backtest: {symbol} ({trade_type.upper()})", fontsize=14)
+        plt.xlabel("Date", fontsize=12)
+        plt.ylabel("Portfolio Value ($)", fontsize=12)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        plot_path = os.path.join(os.getcwd(), "backtest_equity.png")
+        plt.savefig(plot_path)
+        print(f"\n📊 Equity curve saved to: {plot_path}")
 
 if __name__ == "__main__":
     import sys
