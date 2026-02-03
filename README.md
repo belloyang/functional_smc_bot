@@ -17,7 +17,9 @@ This is a trading bot that uses Alpaca API to trade stocks and options.
 - Alpaca API paper trading
 
 ## Installation
-TODO
+```
+python3.12 -m pip install -r requirements.txt
+```
 
 
 ## Configuration

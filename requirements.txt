@@ -1,0 +1,6 @@
+alpaca-py
+pandas
+numpy
+pandas-ta
+python-dotenv
+scipy
