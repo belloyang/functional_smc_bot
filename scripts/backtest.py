@@ -139,6 +139,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock"):
         
         if not (market_open <= current_time_et <= market_close):
             continue
+
+        # --- DAYS BACK ENFORCEMENT ---
+        # We fetched extra data for warmup, but we only want to trade starting from days_back
+        simulation_start_time = end_time - timedelta(days=days_back)
+        if current_time_utc < simulation_start_time:
+            continue
             
         # Get HTF data up to current_time
         htf_slice = htf_data[htf_data.index <= current_time_utc]
