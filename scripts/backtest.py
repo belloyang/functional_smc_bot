@@ -482,7 +482,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         output_dir = os.path.join(os.getcwd(), "backtest-output")
         os.makedirs(output_dir, exist_ok=True)
-        plot_path = os.path.join(output_dir, f"backtest_equity_{symbol}_{initial_balance}_{days_back}.png")
+        plot_path = os.path.join(output_dir, f"backtest_{mode}_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
         print(f"\n📊 Equity curve saved to: {plot_path}")
 
