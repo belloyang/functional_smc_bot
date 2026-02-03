@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import re
+import json
+import os
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
@@ -476,9 +478,7 @@ def place_trade(signal, symbol):
                     symbol=trade_symbol,
                     qty=qty,
                     side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    stop_loss=sl_req,
-                    take_profit=tp_req
+                    time_in_force=TimeInForce.DAY
                 )
                 
                 trade_client.submit_order(order)
@@ -622,6 +622,26 @@ def manage_option_expiry():
 
 from alpaca.trading.requests import ReplaceOrderRequest
 
+# ================= STATE MANAGEMENT =================
+
+STATE_FILE = "trade_state.json"
+
+def load_trade_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading state: {e}")
+    return {}
+
+def save_trade_state(state):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Error saving state: {e}")
+
 def manage_trade_updates():
     """
     Monitors active trades and adjusts Stop Losses.
@@ -640,6 +660,52 @@ def manage_trade_updates():
             entry_price = float(pos.avg_entry_price)
             current_price = float(pos.current_price)
             pl_pct = float(pos.unrealized_plpc)
+            
+            # --- OPTIONS RISK MANAGEMENT (Manual) ---
+            if pos.asset_class == 'us_option':
+                state = load_trade_state()
+                symbol_state = state.get(symbol, {"virtual_stop": -0.20}) # Default -20% SL
+                virtual_stop = symbol_state.get("virtual_stop", -0.20)
+                
+                # Hard TP Threshold
+                OPTION_TP = 0.40
+                
+                # 1. Check Exit Triggers
+                if pl_pct <= virtual_stop:
+                    reason = "VIRTUAL STOP" if virtual_stop > -0.20 else "STOP LOSS"
+                    print(f"🛑 OPTION {reason} HIT: {symbol} at {pl_pct*100:.1f}% (Stop: {virtual_stop*100:.1f}%). Closing.")
+                    trade_client.close_position(symbol)
+                    # Cleanup state
+                    if symbol in state:
+                        del state[symbol]
+                        save_trade_state(state)
+                    continue
+                elif pl_pct >= OPTION_TP:
+                    print(f"🎯 OPTION TAKE PROFIT HIT: {symbol} at {pl_pct*100:.1f}%. Closing.")
+                    trade_client.close_position(symbol)
+                    if symbol in state:
+                        del state[symbol]
+                        save_trade_state(state)
+                    continue
+                
+                # 2. Update Virtual Stop Thresholds (Trailing)
+                updated = False
+                # Lock 15% if up 30%
+                if pl_pct >= 0.30 and virtual_stop < 0.15:
+                    virtual_stop = 0.15
+                    updated = True
+                    print(f"💰 OPTION PROFIT LOCK: {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +15%.")
+                # BE if up 15%
+                elif pl_pct >= 0.15 and virtual_stop < 0.0:
+                    virtual_stop = 0.0
+                    updated = True
+                    print(f"🛡️ OPTION BREAK EVEN: {symbol} up {pl_pct*100:.1f}%. Virtual SL set to Entry (0%).")
+                
+                if updated:
+                    state[symbol] = {"virtual_stop": virtual_stop}
+                    save_trade_state(state)
+                
+                continue
             
             # Thresholds
             BE_THRESHOLD = 0.15
@@ -708,6 +774,22 @@ def manage_trade_updates():
 
     except Exception as e:
         print(f"Error in manage_trade_updates: {e}")
+    
+    # Final Cleanup: Remove state for any symbols we no longer hold
+    try:
+        current_positions = trade_client.get_all_positions()
+        held_symbols = {p.symbol for p in current_positions}
+        state = load_trade_state()
+        state_symbols = list(state.keys())
+        cleaned = False
+        for s in state_symbols:
+            if s not in held_symbols:
+                del state[s]
+                cleaned = True
+        if cleaned:
+            save_trade_state(state)
+    except Exception:
+        pass
 
 # ================= MAIN LOOP =================
 
