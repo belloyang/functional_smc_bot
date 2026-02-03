@@ -1,11 +1,12 @@
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
+import re
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, TimeInForce, PositionSide, OrderStatus, QueryOrderStatus
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, StopLossRequest, TakeProfitRequest
 try:
     from . import config
 except ImportError:
@@ -335,6 +336,19 @@ def get_current_position(symbol):
     except Exception:
         return None
 
+def cancel_all_orders_for_symbol(symbol):
+    """
+    Safely cancels all open orders for a specific symbol.
+    """
+    try:
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbol=symbol)
+        orders = trade_client.get_orders(req)
+        for o in orders:
+            trade_client.cancel_order_by_id(o.id)
+            print(f"Cancelled order {o.id} for {symbol}")
+    except Exception as e:
+        print(f"⚠️ Error cancelling orders for {symbol}: {e}")
+
 def place_trade(signal, symbol):
     # Get latest price and ample history for Swing Point detection
     # We need enough history to find a swing point (e.g. 50-100 bars)
@@ -354,11 +368,56 @@ def place_trade(signal, symbol):
     print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held})")
 
 
-    # ================= OPTIONS MODE =================
+    # 1. Global Position Cleanup (Cross-Asset Signal Flip)
+    any_options_held = False
+    try:
+        all_positions = trade_client.get_all_positions()
+        for pos in all_positions:
+            if not pos.symbol.startswith(symbol): continue
+            
+            # Identify if it's the underlying or an option
+            is_stock = (pos.asset_class.value == 'us_equity' and pos.symbol == symbol)
+            is_option = (pos.asset_class.value == 'us_option')
+            
+            if is_option: any_options_held = True
+
+            # Identify Bias
+            is_bullish = False
+            if is_stock:
+                is_bullish = (pos.side == PositionSide.LONG)
+            elif is_option:
+                # Parse for C/P
+                m = re.search(r'\d{6}([CP])\d{8}', pos.symbol)
+                is_bullish = (m and m.group(1) == 'C')
+
+            # Conflict Detection: Close if signal is opposite of current holding bias
+            if (signal == "buy" and not is_bullish) or (signal == "sell" and is_bullish):
+                print(f"🔄 CROSS-ASSET CLEANUP: Closing {pos.symbol} bias conflict with {signal.upper()} signal.")
+                try:
+                    cancel_all_orders_for_symbol(pos.symbol)
+                    trade_client.close_position(pos.symbol)
+                    if is_stock: 
+                        qty_held = 0
+                        side_held = None
+                    if is_option:
+                        any_options_held = False
+                except Exception as close_err:
+                    print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
+    except Exception as e:
+        print(f"⚠️ Cleanup warning: {e}")
+
+    # 2. Mix-up Guards (Prevent holding both Stock and Options for same symbol)
     if getattr(config, 'ENABLE_OPTIONS', False):
         if qty_held != 0:
              print(f"Warning: Holding underlying shares ({qty_held}) while in Options Mode. Skipping new option entries to avoid mix-up.")
              return
+    else:
+        if any_options_held:
+             print(f"Warning: Holding option contracts while in Stock Mode. Skipping new stock entries to avoid mix-up.")
+             return
+
+    # ================= OPTIONS MODE =================
+    if getattr(config, 'ENABLE_OPTIONS', False):
 
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         contract = get_best_option_contract(symbol, signal)
@@ -468,12 +527,11 @@ def place_trade(signal, symbol):
             except Exception as e:
                 print(f"❌ Order failed: {e}")
         
-        elif side_held == OrderSide.SELL: 
+        elif side_held == PositionSide.SHORT: 
              print(f"Closing Short Position ({qty_held} shares) due to BUY signal.")
              try:
                 # Safety: Cancel any existing open orders (SL/TP) for this symbol first
-                trade_client.cancel_orders(symbols=[symbol])
-                print(f"Cancelled open orders for {symbol}")
+                cancel_all_orders_for_symbol(symbol)
                 
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
@@ -488,12 +546,11 @@ def place_trade(signal, symbol):
             print("SELL Signal detected but no position held. Skipping Short Entry (Long-Only Mode).")
             return
             
-        elif side_held == OrderSide.BUY: # We are Long
+        elif side_held == PositionSide.LONG: # We are Long
             print(f"Closing Long Position ({qty_held} shares) due to SELL signal.")
             try:
                 # Safety: Cancel any existing open orders (SL/TP) for this symbol first
-                trade_client.cancel_orders(symbols=[symbol])
-                print(f"Cancelled open orders for {symbol}")
+                cancel_all_orders_for_symbol(symbol)
                 
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
