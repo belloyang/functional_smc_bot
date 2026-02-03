@@ -294,7 +294,7 @@ def get_best_option_contract(symbol, signal_type, known_price=None):
             current_price = current_price_df['close'].iloc[-1]
             
         now = datetime.now()
-        start_date = now + timedelta(days=2)
+        start_date = now + timedelta(days=3)
         end_date = now + timedelta(days=14)
         
         contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
@@ -607,23 +607,15 @@ def manage_option_expiry():
                 print(f"Could not parse expiry for {pos.symbol}, skipping.")
                 continue
                 
-            dte = (expiry - now).days
+            # Precision Check: Only close if today IS the expiration day or later
+            is_expiry_day = (now.date() >= expiry.date())
             
-            # Logic:
-            # expiry is e.g. 2025-12-19 00:00:00.
-            # now is 2025-12-17 15:00:00.
-            # delta is ~1.4 days. .days returns 1.
-            
-            if dte <= 1:
-                print(f"⚠️ CRITICAL: {pos.symbol} expires in {dte} days! Force Closing.")
-                trade_client.close_position(pos.symbol)
-            elif dte <= 3:
-                print(f"⚠️ THETA DECAY: {pos.symbol} has {dte} days left (Stale). Closing to preserve value.")
+            if is_expiry_day:
+                print(f"⚠️ CRITICAL: {pos.symbol} expires TODAY ({expiry.date()})! Force Closing.")
                 trade_client.close_position(pos.symbol)
             else:
-                # DEBUG log only occasionally?
-                # print(f"DEBUG: {pos.symbol} DTE: {dte} (Safe)")
-                pass
+                days_left = (expiry.date() - now.date()).days
+                print(f"DEBUG: {pos.symbol} DTE: {days_left} days (Expires: {expiry.date()}) - Safe")
 
     except Exception as e:
         print(f"Error in manage_option_expiry: {e}")

@@ -253,8 +253,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         active_trade['stop_loss'] = lock_price
                         print(f"[{current_time_et}] 💰 OPTION LOCKED PROFIT ({lock_price:.2f})")
                 
-                # 4. Expiry Guard (Sync with bot.py: <= 3 days)
-                if T_remain * 365.0 <= 3.0:
+                # 4. Expiry Guard (Sync with bot.py: Close ON expiration day)
+                is_expiry_day = (current_time_utc.date() >= active_trade['expiry_date'].date())
+                if is_expiry_day:
                      exit_price = current_option_price
                      proceeds = exit_price * 100 * abs(position)
                      balance += proceeds
@@ -318,6 +319,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         active_trade = {
                             'strike': strike,
                             'expiry_days': days_to_expiry,
+                            'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
                             'entry_time': current_time_utc,
                             'type': 'call',
                             'stop_loss': premium * 0.80, # -20%
@@ -366,6 +368,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         active_trade = {
                             'strike': strike,
                             'expiry_days': days_to_expiry,
+                            'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
                             'entry_time': current_time_utc,
                             'type': 'put',
                             'stop_loss': premium * 0.80,
