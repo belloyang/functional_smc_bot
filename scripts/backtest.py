@@ -446,18 +446,43 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         df_equity = pd.DataFrame(equity_curve)
         df_equity.set_index('time', inplace=True)
         
-        plt.figure(figsize=(12, 6))
-        plt.plot(df_equity.index, df_equity['balance'], label='Account Equity', color='#2ca02c')
-        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] >= initial_balance), color='#2ca02c', alpha=0.3)
-        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] < initial_balance), color='#d62728', alpha=0.3)
+        # Calculate stats for the plot
+        final_return_pct = ((balance - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
+        peak_equity = df_equity['balance'].max()
+        max_profit = peak_equity - initial_balance
         
-        plt.title(f"SMC Bot Backtest: {symbol} ({trade_type.upper()})", fontsize=14)
+        # Drawdown calculation
+        rolling_max = df_equity['balance'].cummax()
+        drawdown = (df_equity['balance'] - rolling_max) / rolling_max
+        max_drawdown_pct = drawdown.min() * 100
+        
+        plt.figure(figsize=(12, 7))
+        plt.plot(df_equity.index, df_equity['balance'], label='Account Equity', color='#2ca02c', linewidth=2)
+        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] >= initial_balance), color='#2ca02c', alpha=0.2)
+        plt.fill_between(df_equity.index, df_equity['balance'], initial_balance, where=(df_equity['balance'] < initial_balance), color='#d62728', alpha=0.2)
+        
+        # Summary Box
+        stats_text = (
+            f"Initial Balance: ${initial_balance:,.2f}\n"
+            f"Final Balance: ${balance:,.2f}\n"
+            f"Total Return: {final_return_pct:.2f}%\n"
+            f"Max Profit: ${max_profit:,.2f}\n"
+            f"Max Drawdown: {max_drawdown_pct:.2f}%\n"
+            f"Total Trades: {len(trades)}"
+        )
+        plt.text(0.02, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.title(f"SMC Bot Backtest: {symbol} ({trade_type.upper()})", fontsize=14, pad=20)
         plt.xlabel("Date", fontsize=12)
         plt.ylabel("Portfolio Value ($)", fontsize=12)
-        plt.legend()
+        plt.legend(loc='lower right')
         plt.grid(True, alpha=0.3)
+        plt.tight_layout()
         
-        plot_path = os.path.join(os.getcwd(), "backtest_equity.png")
+        output_dir = os.path.join(os.getcwd(), "backtest-output")
+        os.makedirs(output_dir, exist_ok=True)
+        plot_path = os.path.join(output_dir, f"backtest_equity_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
         print(f"\n📊 Equity curve saved to: {plot_path}")
 
