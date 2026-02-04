@@ -385,7 +385,7 @@ def place_trade(signal, symbol):
     print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held}) | Options: {any_options_held}")
 
     # 2. Global Position Cleanup (Cross-Asset Signal Flip)
-    # We loop through our cached 'all_positions' and fire close orders for conflicts
+    same_bias_held = False
     for pos in all_positions:
         if not pos.symbol.startswith(symbol): continue
         
@@ -418,6 +418,11 @@ def place_trade(signal, symbol):
                     any_options_held = False
             except Exception as close_err:
                 print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
+        
+        elif (signal == "buy" and is_bullish) or (signal == "sell" and not is_bullish):
+            # Matches signal bias!
+            if is_option:
+                same_bias_held = True
 
 
 
@@ -433,6 +438,10 @@ def place_trade(signal, symbol):
 
     # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
+
+        if same_bias_held:
+            print(f"Existing {signal.upper()} option bias detected for {symbol}. Skipping redundant entry.")
+            return
 
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         contract = get_best_option_contract(symbol, signal)
