@@ -469,7 +469,26 @@ def place_trade(signal, symbol):
                 
                 print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+40%)")
                 
-                qty = 1 # MVP size
+                # --- POSITION SIZING (Risk 10% of Equity) ---
+                account = trade_client.get_account()
+                equity = float(account.equity)
+                budget = equity * 0.10
+                cost_per_contract = entry_est * 100
+                
+                if cost_per_contract > budget:
+                    print(f"⚠️ WARNING: Option contract cost (${cost_per_contract:.2f}) exceeds 10% budget (${budget:.2f}). Skipping.")
+                    return
+                
+                qty = int(budget // cost_per_contract)
+                if qty > 5:
+                    print(f"DEBUG: Capping contracts from {qty} to 5.")
+                    qty = 5
+                    
+                if qty < 1:
+                    print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
+                    return
+
+                print(f"Options Sizing: Budget ${budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
                 
                 sl_req = StopLossRequest(stop_price=sl_price)
                 tp_req = TakeProfitRequest(limit_price=tp_price)

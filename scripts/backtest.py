@@ -311,9 +311,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
 
-                    if balance >= contract_cost:
-                        balance -= contract_cost
-                        position = 1
+                    budget = balance * 0.10
+                    qty = int(budget // contract_cost)
+                    if qty > 5: qty = 5
+                    
+                    if qty >= 1 and balance >= (contract_cost * qty):
+                        total_cost = contract_cost * qty
+                        balance -= total_cost
+                        position = qty
                         entry_price = premium
 
                         active_trade = {
@@ -326,8 +331,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'take_profit': premium * 1.40 # +40%
                         }
 
-                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
+                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
 
             elif position < 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'put'):
                 # Exit Bearish Position due to Bullish Signal Flip
@@ -360,9 +365,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
 
-                    if balance >= contract_cost:
-                        balance -= contract_cost
-                        position = -1 # Negative denotes Put for logic
+                    budget = balance * 0.10
+                    qty = int(budget // contract_cost)
+                    if qty > 5: qty = 5
+                    
+                    if qty >= 1 and balance >= (contract_cost * qty):
+                        total_cost = contract_cost * qty
+                        balance -= total_cost
+                        position = -qty # Negative denotes Put for logic
                         entry_price = premium
 
                         active_trade = {
@@ -374,8 +384,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'stop_loss': premium * 0.80,
                             'take_profit': premium * 1.40
                         }
-                        trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': 1, 'strike': strike})
-                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                        trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
+                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
 
             elif position > 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'call'):
                 # Exit Bullish Position due to Bearish Signal Flip
