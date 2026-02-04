@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.12
+#!/usr/bin/env python3
 """
 Demo script to test the session management functionality.
 This simulates the bot running with different session configurations.

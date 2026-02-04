@@ -138,7 +138,7 @@ def test_session_summary():
     assert "SESSION SUMMARY" in summary
     assert "Trades Executed: 2" in summary
     assert "Trade Limit: 5" in summary
-    assert "Duration Limit: 2" in summary
+    assert "Duration Limit: 2 hours" in summary
     print("✓ Session summary contains expected information")
     print()
 

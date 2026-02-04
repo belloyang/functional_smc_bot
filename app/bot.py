@@ -933,6 +933,15 @@ class TradingSession:
     def request_stop(self):
         """Request session to stop gracefully."""
         self.should_stop = True
+    
+    def setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown."""
+        def signal_handler(signum, frame):
+            print("\n\n🛑 Shutdown signal received. Stopping session gracefully...")
+            self.request_stop()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
 # ================= MAIN LOOP =================
 
@@ -954,13 +963,8 @@ if __name__ == "__main__":
     # Initialize session
     session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
     
-    # Setup signal handler for graceful shutdown
-    def signal_handler(signum, frame):
-        print("\n\n🛑 Shutdown signal received. Stopping session gracefully...")
-        session.request_stop()
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Setup signal handlers for graceful shutdown
+    session.setup_signal_handlers()
     
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
     if args.session_duration:
