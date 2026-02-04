@@ -458,10 +458,10 @@ def place_trade(signal, symbol):
                     print(f"Invalid option ask price {entry_est}. Skipping.")
                     return
                     
-                # Calculate Levels (-20% SL, +40% TP)
+                # Calculate Levels (-20% SL, +60% TP)
                 # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
                 sl_price = entry_est * 0.80
-                tp_price = entry_est * 1.40
+                tp_price = entry_est * 1.60
                 
                 # Round to 2 decimals
                 sl_price = round(sl_price, 2)
@@ -687,7 +687,7 @@ def manage_trade_updates():
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
                 # Hard TP Threshold
-                OPTION_TP = 0.40
+                OPTION_TP = 0.60
                 
                 # 1. Check Exit Triggers
                 if pl_pct <= virtual_stop:
@@ -707,18 +707,22 @@ def manage_trade_updates():
                         save_trade_state(state)
                     continue
                 
-                # 2. Update Virtual Stop Thresholds (Trailing)
+                # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
                 updated = False
-                # Lock 15% if up 30%
-                if pl_pct >= 0.30 and virtual_stop < 0.15:
-                    virtual_stop = 0.15
+                
+                # Hybrid Strategy: +15% BE, +30% -> +10%, +40% -> +20%
+                if pl_pct >= 0.40 and virtual_stop < 0.20:
+                    virtual_stop = 0.20
                     updated = True
-                    print(f"💰 OPTION PROFIT LOCK: {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +15%.")
-                # BE if up 15%
+                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +20%.")
+                elif pl_pct >= 0.30 and virtual_stop < 0.10:
+                    virtual_stop = 0.10
+                    updated = True
+                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +10%.")
                 elif pl_pct >= 0.15 and virtual_stop < 0.0:
                     virtual_stop = 0.0
                     updated = True
-                    print(f"🛡️ OPTION BREAK EVEN: {symbol} up {pl_pct*100:.1f}%. Virtual SL set to Entry (0%).")
+                    print(f"🛡️ OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to BE (0%).")
                 
                 if updated:
                     state[symbol] = {"virtual_stop": virtual_stop}

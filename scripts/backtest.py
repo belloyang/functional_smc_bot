@@ -242,16 +242,23 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     active_trade = None
                     continue
                     
-                # 3. Active Management
+                # 3. Active Management (Hybrid Trailing)
                 pl_pct = (current_option_price - entry_price) / entry_price
-                if pl_pct > 0.15 and active_trade['stop_loss'] < entry_price:
-                    active_trade['stop_loss'] = entry_price
-                    print(f"[{current_time_et}] 🛡️ OPTION MOVED SL TO BE ({entry_price:.2f})")
-                if pl_pct > 0.30:
-                    lock_price = entry_price * 1.15
+                
+                # Hybrid Strategy: +15% BE, +30% -> +10%, +40% -> +20%
+                if pl_pct >= 0.40:
+                    lock_price = entry_price * 1.20 # +20% SL
                     if active_trade['stop_loss'] < lock_price:
                         active_trade['stop_loss'] = lock_price
-                        print(f"[{current_time_et}] 💰 OPTION LOCKED PROFIT ({lock_price:.2f})")
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +20% ({lock_price:.2f})")
+                elif pl_pct >= 0.30:
+                    lock_price = entry_price * 1.10 # +10% SL
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +10% ({lock_price:.2f})")
+                elif pl_pct >= 0.15 and active_trade['stop_loss'] < entry_price:
+                    active_trade['stop_loss'] = entry_price
+                    print(f"[{current_time_et}] 🛡️ OPTION TRAILING (HYBRID): MOVED TO BE ({entry_price:.2f})")
                 
                 # 4. Expiry Guard (Sync with bot.py: Close ON expiration day)
                 is_expiry_day = (current_time_utc.date() >= active_trade['expiry_date'].date())
@@ -328,7 +335,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'entry_time': current_time_utc,
                             'type': 'call',
                             'stop_loss': premium * 0.80, # -20%
-                            'take_profit': premium * 1.40 # +40%
+                            'take_profit': premium * 1.60 # +60%
                         }
 
                         trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
@@ -382,7 +389,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'entry_time': current_time_utc,
                             'type': 'put',
                             'stop_loss': premium * 0.80,
-                            'take_profit': premium * 1.40
+                            'take_profit': premium * 1.60 # +60%
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
