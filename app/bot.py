@@ -526,9 +526,9 @@ def place_trade(signal, symbol):
                 sl_price = price * 0.995
                 print(f"Fallback Stop: 0.5% at {sl_price}")
                 
-            # 1.2 Determine Take Profit (1:2 Risk Reward)
+            # 1.2 Determine Take Profit (1:2.5 Risk Reward)
             risk_dist = price - sl_price
-            tp_price = price + (risk_dist * 2.0)
+            tp_price = price + (risk_dist * 2.5)
             
             # 1.3 Calculate Quantity
             qty = calculate_smart_quantity(price, sl_price)

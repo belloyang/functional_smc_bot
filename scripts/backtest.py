@@ -287,7 +287,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         sl = price * 0.995 # Fallback 0.5%
                     
                     risk_dist = price - sl
-                    tp = price + (risk_dist * 2.0)
+                    tp = price + (risk_dist * 2.5)
                     
                     # Calculate Qty based on Risk (1% of balance)
                     risk_amt = balance * 0.01
