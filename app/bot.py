@@ -868,6 +868,70 @@ def manage_trade_updates():
     except Exception:
         pass
 
+# ================= SESSION MANAGEMENT =================
+
+import signal
+
+class TradingSession:
+    """Manages trading session state and statistics."""
+    
+    def __init__(self, duration_hours=None, max_trades=None):
+        self.start_time = datetime.now()
+        self.duration_hours = duration_hours
+        self.max_trades = max_trades
+        self.trades_executed = 0
+        self.should_stop = False
+        
+    def record_trade(self):
+        """Record that a trade was executed."""
+        self.trades_executed += 1
+        
+    def should_continue(self):
+        """Check if the session should continue running."""
+        if self.should_stop:
+            return False
+            
+        # Check duration limit
+        if self.duration_hours is not None:
+            elapsed_hours = (datetime.now() - self.start_time).total_seconds() / 3600
+            if elapsed_hours >= self.duration_hours:
+                return False
+                
+        # Check trades limit
+        if self.max_trades is not None:
+            if self.trades_executed >= self.max_trades:
+                return False
+                
+        return True
+    
+    def get_summary(self):
+        """Get session summary statistics."""
+        elapsed = datetime.now() - self.start_time
+        hours = int(elapsed.total_seconds() // 3600)
+        minutes = int((elapsed.total_seconds() % 3600) // 60)
+        
+        summary = [
+            "=" * 50,
+            "SESSION SUMMARY",
+            "=" * 50,
+            f"Start Time: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Duration: {hours}h {minutes}m",
+            f"Trades Executed: {self.trades_executed}",
+        ]
+        
+        if self.max_trades:
+            summary.append(f"Trade Limit: {self.max_trades}")
+        if self.duration_hours:
+            summary.append(f"Duration Limit: {self.duration_hours} hours")
+            
+        summary.append("=" * 50)
+        return "\n".join(summary)
+    
+    def request_stop(self):
+        """Request session to stop gracefully."""
+        self.should_stop = True
+
 # ================= MAIN LOOP =================
 
 import sys
@@ -879,6 +943,8 @@ if __name__ == "__main__":
     parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
     parser.add_argument("--no-cap", action="store_true", help="Disable the daily trade cap")
+    parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
+    parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     
     args = parser.parse_args()
     target_symbol = args.symbol
@@ -886,13 +952,28 @@ if __name__ == "__main__":
     if args.options:
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
-        
+    
+    # Initialize session
+    session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
+    
+    # Setup signal handler for graceful shutdown
+    def signal_handler(signum, frame):
+        print("\n\n🛑 Shutdown signal received. Stopping session gracefully...")
+        session.request_stop()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
+    if args.session_duration:
+        print(f"Session Duration: {args.session_duration} hours")
+    if args.max_trades:
+        print(f"Max Trades: {args.max_trades}")
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
 
-    while True:
+    while session.should_continue():
         try:
             # 0. Maintenance Tasks
             manage_option_expiry()
@@ -914,6 +995,7 @@ if __name__ == "__main__":
             if sig:
                 print(f"🚀 Signal detected: {sig.upper()}!")
                 place_trade(sig, target_symbol, use_daily_cap=(not args.no_cap))
+                session.record_trade()
                 # After a trade, sleep for 5 minutes to avoid rapid double-entry
                 print("Trade placed. Cooling down for 5 minutes...")
                 time.sleep(300)
@@ -925,3 +1007,7 @@ if __name__ == "__main__":
             print(f"An error occurred in the main loop: {e}")
             print("Restarting loop in 60 seconds...")
             time.sleep(60)
+    
+    # Session ended
+    print("\n")
+    print(session.get_summary())
