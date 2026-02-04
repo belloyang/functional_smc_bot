@@ -41,7 +41,7 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -285,7 +285,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # --- ENTRY LOGIC ---
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
-            if position == 0 and in_window and daily_trade_count < 5:
+            # Check daily cap if enabled
+            trade_count_ok = (not use_daily_cap) or (daily_trade_count < 5)
+            if position == 0 and in_window and trade_count_ok:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -377,7 +379,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
-            if position == 0 and in_window and daily_trade_count < 5:
+            # Check daily cap if enabled
+            trade_count_ok = (not use_daily_cap) or (daily_trade_count < 5)
+            if position == 0 and in_window and trade_count_ok:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -533,8 +537,9 @@ if __name__ == "__main__":
     parser.add_argument("--options", action="store_true", help="Run backtest with Options instead of Stock")
     parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
+    parser.add_argument("--no-cap", action="store_true", help="Disable the 5-trade per day limit")
     
     args = parser.parse_args()
     
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance)
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=(not args.no_cap))

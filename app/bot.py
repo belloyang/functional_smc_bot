@@ -352,7 +352,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol):
+def place_trade(signal, symbol, use_daily_cap=True):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -376,7 +376,7 @@ def place_trade(signal, symbol):
         daily_count = 0
         ticker_state["last_trade_date"] = today_str
         
-    if daily_count >= 5:
+    if use_daily_cap and daily_count >= 5:
         print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today. Skipping.")
         return
 
@@ -878,6 +878,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
     parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
+    parser.add_argument("--no-cap", action="store_true", help="Disable the daily trade cap")
     
     args = parser.parse_args()
     target_symbol = args.symbol
@@ -912,7 +913,7 @@ if __name__ == "__main__":
             
             if sig:
                 print(f"🚀 Signal detected: {sig.upper()}!")
-                place_trade(sig, target_symbol)
+                place_trade(sig, target_symbol, use_daily_cap=(not args.no_cap))
                 # After a trade, sleep for 5 minutes to avoid rapid double-entry
                 print("Trade placed. Cooling down for 5 minutes...")
                 time.sleep(300)
