@@ -4,6 +4,10 @@ import pandas_ta as ta
 import re
 import json
 import os
+import signal
+import sys
+import argparse
+import time
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
@@ -870,8 +874,6 @@ def manage_trade_updates():
 
 # ================= SESSION MANAGEMENT =================
 
-import signal
-
 class TradingSession:
     """Manages trading session state and statistics."""
     
@@ -933,10 +935,6 @@ class TradingSession:
         self.should_stop = True
 
 # ================= MAIN LOOP =================
-
-import sys
-import argparse
-import time
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")

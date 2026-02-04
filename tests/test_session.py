@@ -1,6 +1,7 @@
 """Tests for TradingSession class."""
 
 import time
+import sys
 from datetime import datetime
 
 
