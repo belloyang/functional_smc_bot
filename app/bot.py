@@ -467,19 +467,28 @@ def place_trade(signal, symbol):
                 sl_price = round(sl_price, 2)
                 tp_price = round(tp_price, 2)
                 
-                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+40%)")
+                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+50%)")
                 
-                # --- POSITION SIZING (Risk 10% of Equity) ---
+                # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
-                budget = equity * 0.10
+                total_budget = equity * 0.10
+                
+                # Fetch all current positions to sum existing option exposure
+                all_positions = trade_client.get_all_positions()
+                existing_option_exposure = 0.0
+                for p in all_positions:
+                    if p.asset_class == 'us_option':
+                        existing_option_exposure += abs(float(p.market_value))
+                
+                remaining_budget = total_budget - existing_option_exposure
                 cost_per_contract = entry_est * 100
                 
-                if cost_per_contract > budget:
-                    print(f"⚠️ WARNING: Option contract cost (${cost_per_contract:.2f}) exceeds 10% budget (${budget:.2f}). Skipping.")
+                if remaining_budget < cost_per_contract:
+                    print(f"⚠️ WARNING: Global Option Budget (${total_budget:.2f}) with Current Exposure (${existing_option_exposure:.2f}) leaves only ${remaining_budget:.2f}. Insufficient for 1 contract (${cost_per_contract:.2f}). Skipping.")
                     return
                 
-                qty = int(budget // cost_per_contract)
+                qty = int(remaining_budget // cost_per_contract)
                 if qty > 5:
                     print(f"DEBUG: Capping contracts from {qty} to 5.")
                     qty = 5
@@ -488,7 +497,7 @@ def place_trade(signal, symbol):
                     print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
                     return
 
-                print(f"Options Sizing: Budget ${budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
+                print(f"Global Option Sizing: Total Equity ${equity:.2f} | Remaining Budget ${remaining_budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
                 
                 sl_req = StopLossRequest(stop_price=sl_price)
                 tp_req = TakeProfitRequest(limit_price=tp_price)
