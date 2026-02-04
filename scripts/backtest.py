@@ -48,14 +48,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
     
     # 1. Fetch Data
-    # ... (Data fetching code omitted for brevity as it is unchanged) ...
-    # Note: replace_file_content replaces contiguous blocks. I need to be careful not to delete the data fetching block if I bridge the gap.
-    # Actually, the user asked to update "initial balance and days_back". 
-    # I will replace the signature line and the hardcoded balance line separately or in a large block if safe.
-    # It is safer here to do two replaces or one large block if I know the content.
-    # I'll just change the signature line first.
-    
-    # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     
     end_time = datetime.now(timezone.utc)
@@ -130,6 +122,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     trades = []
     print(f"Initial balance: {balance}")
     
+    daily_trade_count = 0
+    last_trade_date = None
+    last_exit_time = None # New: Track cool-down
+    
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
@@ -143,12 +139,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
-        # --- MARKET HOURS FILTER (9:30 AM - 4:00 PM ET) ---
-        market_open = current_time_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = current_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
+        trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
+        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
         
-        if not (market_open <= current_time_et <= market_close):
-            continue
+        in_window = (trade_window_start <= current_time_et <= trade_window_end)
+        
+        # We don't 'continue' here because we still want to manage open positions
+        # outside the entry window (e.g. for stops/targets during the first 30 mins).
 
         # --- DAYS BACK ENFORCEMENT ---
         # We fetched extra data for warmup, but we only want to trade starting from days_back
@@ -184,6 +182,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
+                    last_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
@@ -196,6 +195,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
+                    last_exit_time = current_time_utc
                     continue
 
                 # 3. Active Management
@@ -228,6 +228,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
+                    last_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
@@ -240,6 +241,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
+                    last_exit_time = current_time_utc
                     continue
                     
                 # 3. Active Management (Hybrid Trailing)
@@ -271,12 +273,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                      print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
                      position = 0
                      active_trade = None
+                     last_exit_time = current_time_utc
                      continue
+
+        # --- DAILY TRADE CAP ---
+        current_date = current_time_et.date()
+        if last_trade_date != current_date:
+            daily_trade_count = 0
+            last_trade_date = current_date
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
-            if position == 0:
+            if position == 0 and in_window and daily_trade_count < 5:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -298,6 +307,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         balance -= cost
                         position = qty
                         entry_price = price
+                        daily_trade_count += 1
 
                         # Store trade metadata for management
                         active_trade = {
@@ -318,8 +328,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
 
-                    budget = balance * 0.10
-                    qty = int(budget // contract_cost)
+                    total_budget = balance * 0.10
+                    existing_option_exposure = 0.0 # Parity with bot.py
+                    remaining_budget = total_budget - existing_option_exposure
+                    
+                    qty = int(remaining_budget // contract_cost)
                     if qty > 5: qty = 5
                     
                     if qty >= 1 and balance >= (contract_cost * qty):
@@ -327,6 +340,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         balance -= total_cost
                         position = qty
                         entry_price = premium
+                        daily_trade_count += 1
 
                         active_trade = {
                             'strike': strike,
@@ -363,7 +377,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
-            if position == 0:
+            if position == 0 and in_window and daily_trade_count < 5:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -372,8 +386,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
 
-                    budget = balance * 0.10
-                    qty = int(budget // contract_cost)
+                    total_budget = balance * 0.10
+                    existing_option_exposure = 0.0 # Parity with bot.py
+                    remaining_budget = total_budget - existing_option_exposure
+                    
+                    qty = int(remaining_budget // contract_cost)
                     if qty > 5: qty = 5
                     
                     if qty >= 1 and balance >= (contract_cost * qty):
@@ -381,6 +398,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         balance -= total_cost
                         position = -qty # Negative denotes Put for logic
                         entry_price = premium
+                        daily_trade_count += 1
 
                         active_trade = {
                             'strike': strike,

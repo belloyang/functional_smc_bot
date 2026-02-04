@@ -34,6 +34,7 @@ from alpaca.data.historical import OptionHistoricalDataClient
 option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 def get_bars(symbol, timeframe, limit):
     # Calculate a lookback to ensure we have enough data (e.g. 5 days)
@@ -352,6 +353,33 @@ def cancel_all_orders_for_symbol(symbol):
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
 def place_trade(signal, symbol):
+    # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    current_time = now_et.time()
+    start_time = datetime.strptime("09:40:00", "%H:%M:%S").time()
+    end_time = datetime.strptime("15:55:00", "%H:%M:%S").time()
+    
+    if current_time < start_time or current_time > end_time:
+        print(f"🕒 TIME FILTER: Current time {current_time} is outside the 09:40-15:55 window. Skipping.")
+        return
+
+    # --- DAILY TRADE CAP (Max 3 entries per day) ---
+    state = load_trade_state()
+    today_str = now_et.strftime("%Y-%m-%d")
+    
+    # Initialize or reset daily count
+    ticker_state = state.get(symbol, {})
+    last_date = ticker_state.get("last_trade_date")
+    daily_count = ticker_state.get("daily_trade_count", 0)
+    
+    if last_date != today_str:
+        daily_count = 0
+        ticker_state["last_trade_date"] = today_str
+        
+    if daily_count >= 5:
+        print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today. Skipping.")
+        return
+
     # Get latest price and ample history for Swing Point detection
     # We need enough history to find a swing point (e.g. 50-100 bars)
     price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 100)
@@ -520,6 +548,10 @@ def place_trade(signal, symbol):
                 
                 trade_client.submit_order(order)
                 print(f"✅ OPTION BRACKET SUBMITTED: {trade_symbol}")
+                # Update daily count
+                ticker_state["daily_trade_count"] = daily_count + 1
+                state[symbol] = ticker_state
+                save_trade_state(state)
                 return
 
             except Exception as e:
@@ -574,6 +606,10 @@ def place_trade(signal, symbol):
                 )
                 trade_client.submit_order(order)
                 print("✅ BUY BRACKET ORDER SUBMITTED")
+                # Update daily count
+                ticker_state["daily_trade_count"] = daily_count + 1
+                state[symbol] = ticker_state
+                save_trade_state(state)
             except Exception as e:
                 print(f"❌ Order failed: {e}")
         
