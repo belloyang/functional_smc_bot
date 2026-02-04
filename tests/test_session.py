@@ -73,13 +73,13 @@ def test_session_duration_limit():
     # Create session with very short duration (0.001 hours ~ 3.6 seconds)
     session = TradingSession(duration_hours=0.001)
     
-    assert session.should_continue() == True
+    assert session.should_continue()
     print("✓ Session initially continues")
     
     # Wait for duration to expire
     time.sleep(4)
     
-    assert session.should_continue() == False
+    assert not session.should_continue()
     print("✓ Session stops after duration limit")
     print()
 
@@ -90,22 +90,22 @@ def test_session_trade_limit():
     
     session = TradingSession(max_trades=3)
     
-    assert session.should_continue() == True
+    assert session.should_continue()
     assert session.trades_executed == 0
     print("✓ Session starts with 0 trades")
     
     # Record 3 trades
     session.record_trade()
     assert session.trades_executed == 1
-    assert session.should_continue() == True
+    assert session.should_continue()
     
     session.record_trade()
     assert session.trades_executed == 2
-    assert session.should_continue() == True
+    assert session.should_continue()
     
     session.record_trade()
     assert session.trades_executed == 3
-    assert session.should_continue() == False
+    assert not session.should_continue()
     print("✓ Session stops after max trades reached")
     print()
 
@@ -116,11 +116,11 @@ def test_session_manual_stop():
     
     session = TradingSession()
     
-    assert session.should_continue() == True
+    assert session.should_continue()
     print("✓ Session initially continues")
     
     session.request_stop()
-    assert session.should_continue() == False
+    assert not session.should_continue()
     print("✓ Session stops after manual request")
     print()
 
@@ -152,7 +152,7 @@ def test_session_unlimited():
     # Unlimited session should always continue (until manually stopped)
     for i in range(10):
         session.record_trade()
-        assert session.should_continue() == True
+        assert session.should_continue()
     
     print("✓ Unlimited session continues indefinitely")
     print()
