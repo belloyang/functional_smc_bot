@@ -458,10 +458,10 @@ def place_trade(signal, symbol):
                     print(f"Invalid option ask price {entry_est}. Skipping.")
                     return
                     
-                # Calculate Levels (-20% SL, +60% TP)
+                # Calculate Levels (-20% SL, +50% TP)
                 # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
                 sl_price = entry_est * 0.80
-                tp_price = entry_est * 1.60
+                tp_price = entry_est * 1.50
                 
                 # Round to 2 decimals
                 sl_price = round(sl_price, 2)
@@ -687,7 +687,7 @@ def manage_trade_updates():
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
                 # Hard TP Threshold
-                OPTION_TP = 0.60
+                OPTION_TP = 0.50
                 
                 # 1. Check Exit Triggers
                 if pl_pct <= virtual_stop:

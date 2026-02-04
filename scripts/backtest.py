@@ -335,7 +335,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'entry_time': current_time_utc,
                             'type': 'call',
                             'stop_loss': premium * 0.80, # -20%
-                            'take_profit': premium * 1.60 # +60%
+                            'take_profit': premium * 1.50 # +50%
                         }
 
                         trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
@@ -389,7 +389,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'entry_time': current_time_utc,
                             'type': 'put',
                             'stop_loss': premium * 0.80,
-                            'take_profit': premium * 1.60 # +60%
+                            'take_profit': premium * 1.50 # +50%
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
