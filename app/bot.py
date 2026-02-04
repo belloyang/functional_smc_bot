@@ -943,6 +943,14 @@ class TradingSession:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+def interruptible_sleep(seconds, session):
+    """Sleeps for the specified time, but returns early if session should stop."""
+    end_time = time.time() + seconds
+    while time.time() < end_time and session.should_continue():
+        # Sleep in small increments to stay responsive
+        remaining = end_time - time.time()
+        time.sleep(min(1.0, remaining))
+
 # ================= MAIN LOOP =================
 
 if __name__ == "__main__":
@@ -975,40 +983,44 @@ if __name__ == "__main__":
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
 
-    while session.should_continue():
-        try:
-            # 0. Maintenance Tasks
-            manage_option_expiry()
-            manage_trade_updates() # <--- NEW Call
-            
-            # 1. Check if market is open
-            clock = trade_client.get_clock()
-            if not clock.is_open:
-                next_open_et = clock.next_open.astimezone(ET)
-                print(f"Market is CLOSED. Next open: {next_open_et}. Waiting 15 minutes...")
-                time.sleep(900) # Wait 15 minutes
-                continue
+    try:
+        while session.should_continue():
+            try:
+                # 0. Maintenance Tasks
+                manage_option_expiry()
+                manage_trade_updates() # <--- NEW Call
+                
+                # 1. Check if market is open
+                clock = trade_client.get_clock()
+                if not clock.is_open:
+                    next_open_et = clock.next_open.astimezone(ET)
+                    print(f"Market is CLOSED. Next open: {next_open_et}. Waiting 15 minutes...")
+                    interruptible_sleep(900, session) # Wait 15 minutes
+                    continue
 
-            # 2. Market is open, look for signals
-            timestamp_et = clock.timestamp.astimezone(ET)
-            print(f"Analyzing {target_symbol} at {timestamp_et}...")
-            sig = generate_signal(target_symbol)
-            
-            if sig:
-                print(f"🚀 Signal detected: {sig.upper()}!")
-                place_trade(sig, target_symbol, use_daily_cap=(not args.no_cap))
-                session.record_trade()
-                # After a trade, sleep for 5 minutes to avoid rapid double-entry
-                print("Trade placed. Cooling down for 5 minutes...")
-                time.sleep(300)
-            else:
-                # No signal, wait 1 minute before checking again
-                time.sleep(60)
+                # 2. Market is open, look for signals
+                timestamp_et = clock.timestamp.astimezone(ET)
+                print(f"Analyzing {target_symbol} at {timestamp_et}...")
+                sig = generate_signal(target_symbol)
+                
+                if sig:
+                    print(f"🚀 Signal detected: {sig.upper()}!")
+                    place_trade(sig, target_symbol, use_daily_cap=(not args.no_cap))
+                    session.record_trade()
+                    # After a trade, sleep for 5 minutes to avoid rapid double-entry
+                    print("Trade placed. Cooling down for 5 minutes...")
+                    interruptible_sleep(300, session)
+                else:
+                    # No signal, wait 1 minute before checking again
+                    interruptible_sleep(60, session)
 
-        except Exception as e:
-            print(f"An error occurred in the main loop: {e}")
-            print("Restarting loop in 60 seconds...")
-            time.sleep(60)
+            except Exception as e:
+                print(f"An error occurred in the main loop: {e}")
+                print("Restarting loop in 60 seconds...")
+                interruptible_sleep(60, session)
+    except KeyboardInterrupt:
+        # If signal handler didn't catch it for some reason
+        session.request_stop()
     
     # Session ended
     print("\n")
