@@ -1,0 +1,76 @@
+name: Python Application
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  schedule:
+    # Runs at 9:30 AM New York time (Eastern Time) Monday-Friday
+    # During EDT (Daylight Saving Time): 9:30 AM EDT = 1:30 PM UTC (13:30)
+    # During EST (Standard Time): 9:30 AM EST = 2:30 PM UTC (14:30)
+    # Using 13:30 UTC for EDT period (most of the trading year)
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run session tests
+      run: |
+        python tests/test_session.py
+    
+    - name: Test application import
+      env:
+        ALPACA_API_KEY: "test_key"
+        ALPACA_API_SECRET: "test_secret"
+      run: |
+        python -c "from app import bot, config; print('✓ Application modules imported successfully')"
+  
+  run-with-credentials:
+    runs-on: ubuntu-latest
+    # Only run if secrets are available
+    if: ${{ secrets.ALPACA_API_KEY != '' && secrets.ALPACA_API_SECRET != '' }}
+    needs: test
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run application with credentials
+      env:
+        ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+        ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+      run: |
+        # Run the bot for 10 hours session
+        # Scheduled to run Monday-Friday at 9:30 AM New York time
+        python -m app.bot SPY --session-duration 10
+        echo "✓ Application executed successfully"
