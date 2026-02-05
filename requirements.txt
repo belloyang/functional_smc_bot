@@ -1,6 +1,6 @@
 alpaca-py
 pandas>=2.0.0
-numpy<=2.2.0
+numpy>=2.2.6
 pandas-ta
 python-dotenv
 scipy
