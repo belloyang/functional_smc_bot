@@ -9,7 +9,9 @@ on:
     # Runs at 9:30 AM New York time (Eastern Time) Monday-Friday
     # During EDT (Daylight Saving Time): 9:30 AM EDT = 1:30 PM UTC (13:30)
     # During EST (Standard Time): 9:30 AM EST = 2:30 PM UTC (14:30)
-    # Using 13:30 UTC for EDT period (most of the trading year)
+    # Note: GitHub Actions uses UTC and does not auto-adjust for DST.
+    # This schedule uses 13:30 UTC for EDT (March-November).
+    # For EST period, manually update to '30 14 * * 1-5' or adjust bot runtime.
     - cron: '30 13 * * 1-5'
   workflow_dispatch:
 
@@ -47,8 +49,8 @@ jobs:
   
   run-with-credentials:
     runs-on: ubuntu-latest
-    # Only run if secrets are available
-    if: ${{ secrets.ALPACA_API_KEY != '' && secrets.ALPACA_API_SECRET != '' }}
+    # Only run on scheduled executions and manual workflow dispatch
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     needs: test
 
     steps:
@@ -73,4 +75,3 @@ jobs:
         # Run the bot for 10 hours session
         # Scheduled to run Monday-Friday at 9:30 AM New York time
         python -m app.bot SPY --session-duration 10
-        echo "✓ Application executed successfully"
