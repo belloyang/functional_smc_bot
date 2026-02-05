@@ -356,7 +356,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol, use_daily_cap=True):
+def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -367,7 +367,7 @@ def place_trade(signal, symbol, use_daily_cap=True):
         print(f"🕒 TIME FILTER: Current time {current_time} is outside the 09:40-15:55 window. Skipping.")
         return
 
-    # --- DAILY TRADE CAP (Max 3 entries per day) ---
+    # --- DAILY TRADE CAP ---
     state = load_trade_state()
     today_str = now_et.strftime("%Y-%m-%d")
     
@@ -379,9 +379,15 @@ def place_trade(signal, symbol, use_daily_cap=True):
     if last_date != today_str:
         daily_count = 0
         ticker_state["last_trade_date"] = today_str
-        
-    if use_daily_cap and daily_count >= 5:
-        print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today. Skipping.")
+    
+    # Determine the cap to use
+    if daily_cap_value is None:
+        cap_limit = 5  # Default cap
+    else:
+        cap_limit = daily_cap_value
+    
+    if use_daily_cap and cap_limit >= 0 and daily_count >= cap_limit:
+        print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today (limit: {cap_limit}). Skipping.")
         return
 
     # Get latest price and ample history for Swing Point detection
@@ -1088,7 +1094,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
     parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
-    parser.add_argument("--no-cap", action="store_true", help="Disable the daily trade cap")
+    parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
     parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     
@@ -1099,6 +1105,16 @@ if __name__ == "__main__":
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
     
+    # Handle daily trade cap
+    daily_cap = args.cap if args.cap is not None else 5  # Default to 5
+    
+    if daily_cap == 0:
+        print("⚠️  WARNING: Daily trade cap is set to 0. No trades will be executed.")
+        response = input("Do you want to continue? (yes/no): ")
+        if response.lower() not in ['yes', 'y']:
+            print("Exiting...")
+            sys.exit(0)
+    
     # Initialize session
     session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
     
@@ -1106,6 +1122,12 @@ if __name__ == "__main__":
     session.setup_signal_handlers()
     
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
+    if daily_cap == -1:
+        print(f"Daily Trade Cap: Unlimited")
+    elif daily_cap == 0:
+        print(f"Daily Trade Cap: 0 (No trades allowed)")
+    else:
+        print(f"Daily Trade Cap: {daily_cap} trades per day")
     if args.session_duration:
         print(f"Session Duration: {args.session_duration} hours")
     if args.max_trades:
@@ -1136,7 +1158,9 @@ if __name__ == "__main__":
                 
                 if sig:
                     print(f"🚀 Signal detected: {sig.upper()}!")
-                    place_trade(sig, target_symbol, use_daily_cap=(not args.no_cap))
+                    # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
+                    use_cap = (daily_cap != -1)
+                    place_trade(sig, target_symbol, use_daily_cap=use_cap, daily_cap_value=daily_cap if use_cap else None)
                     session.record_trade()
                     # After a trade, sleep for 5 minutes to avoid rapid double-entry
                     print("Trade placed. Cooling down for 5 minutes...")

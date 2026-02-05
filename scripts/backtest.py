@@ -41,7 +41,7 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -286,7 +286,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
             # Check daily cap if enabled
-            trade_count_ok = (not use_daily_cap) or (daily_trade_count < 5)
+            trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             if position == 0 and in_window and trade_count_ok:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
@@ -380,7 +380,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
             # Check daily cap if enabled
-            trade_count_ok = (not use_daily_cap) or (daily_trade_count < 5)
+            trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             if position == 0 and in_window and trade_count_ok:
                 # Enter Short (Options only)
                 if trade_type == "options":
@@ -537,9 +537,21 @@ if __name__ == "__main__":
     parser.add_argument("--options", action="store_true", help="Run backtest with Options instead of Stock")
     parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
-    parser.add_argument("--no-cap", action="store_true", help="Disable the 5-trade per day limit")
+    parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
     
     args = parser.parse_args()
     
+    # Handle daily cap
+    if args.cap is not None:
+        if args.cap == -1:
+            use_daily_cap = False
+            daily_cap_value = 5  # Doesn't matter when cap is disabled
+        else:
+            use_daily_cap = True
+            daily_cap_value = args.cap
+    else:
+        use_daily_cap = True  # Default behavior
+        daily_cap_value = 5
+    
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=(not args.no_cap))
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value)
