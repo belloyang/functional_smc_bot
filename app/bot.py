@@ -884,9 +884,42 @@ class TradingSession:
         self.trades_executed = 0
         self.should_stop = False
         
+        # Enhanced tracking
+        self.opening_equity = None
+        self.opening_positions = []
+        self.closed_trades = []  # List of dicts with {symbol, pnl, win}
+        
+        # Capture opening state
+        try:
+            account = trade_client.get_account()
+            self.opening_equity = float(account.equity)
+            
+            # Capture opening positions
+            positions = trade_client.get_all_positions()
+            for pos in positions:
+                self.opening_positions.append({
+                    'symbol': pos.symbol,
+                    'qty': float(pos.qty),
+                    'side': pos.side.value,
+                    'entry_price': float(pos.avg_entry_price),
+                    'market_value': float(pos.market_value),
+                    'unrealized_pl': float(pos.unrealized_pl)
+                })
+        except Exception as e:
+            print(f"⚠️ Could not capture opening state: {e}")
+            self.opening_equity = 0.0
+        
     def record_trade(self):
         """Record that a trade was executed."""
         self.trades_executed += 1
+    
+    def record_closed_trade(self, symbol, pnl):
+        """Record a closed trade with its P&L."""
+        self.closed_trades.append({
+            'symbol': symbol,
+            'pnl': pnl,
+            'win': pnl > 0
+        })
         
     def should_continue(self):
         """Check if the session should continue running."""
@@ -912,22 +945,120 @@ class TradingSession:
         hours = int(elapsed.total_seconds() // 3600)
         minutes = int((elapsed.total_seconds() % 3600) // 60)
         
+        # Get current account state
+        closing_equity = 0.0
+        closing_positions = []
+        try:
+            account = trade_client.get_account()
+            closing_equity = float(account.equity)
+            
+            positions = trade_client.get_all_positions()
+            for pos in positions:
+                closing_positions.append({
+                    'symbol': pos.symbol,
+                    'qty': float(pos.qty),
+                    'side': pos.side.value,
+                    'entry_price': float(pos.avg_entry_price),
+                    'current_price': float(pos.current_price),
+                    'market_value': float(pos.market_value),
+                    'unrealized_pl': float(pos.unrealized_pl),
+                    'unrealized_plpc': float(pos.unrealized_plpc)
+                })
+        except Exception as e:
+            print(f"⚠️ Could not fetch closing state: {e}")
+        
+        # Calculate statistics
+        total_pnl = closing_equity - self.opening_equity if self.opening_equity else 0.0
+        pnl_pct = (total_pnl / self.opening_equity * 100) if self.opening_equity else 0.0
+        
+        # Win rate from closed trades
+        wins = sum(1 for t in self.closed_trades if t['win'])
+        losses = len(self.closed_trades) - wins
+        win_rate = (wins / len(self.closed_trades) * 100) if self.closed_trades else 0.0
+        
+        # P&L stats from closed trades
+        closed_pnl = sum(t['pnl'] for t in self.closed_trades)
+        winning_trades = [t['pnl'] for t in self.closed_trades if t['win']]
+        losing_trades = [t['pnl'] for t in self.closed_trades if not t['win']]
+        
+        avg_win = sum(winning_trades) / len(winning_trades) if winning_trades else 0.0
+        avg_loss = sum(losing_trades) / len(losing_trades) if losing_trades else 0.0
+        largest_win = max(winning_trades) if winning_trades else 0.0
+        largest_loss = min(losing_trades) if losing_trades else 0.0
+        
+        # Build summary
         summary = [
-            "=" * 50,
+            "=" * 60,
             "SESSION SUMMARY",
-            "=" * 50,
-            f"Start Time: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Duration: {hours}h {minutes}m",
+            "=" * 60,
+            f"Start Time:      {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"End Time:        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Duration:        {hours}h {minutes}m",
+            "",
+            "ACCOUNT PERFORMANCE",
+            "-" * 60,
+            f"Opening Equity:  ${self.opening_equity:,.2f}",
+            f"Closing Equity:  ${closing_equity:,.2f}",
+            f"Total P&L:       ${total_pnl:+,.2f} ({pnl_pct:+.2f}%)",
+            "",
+            "TRADING ACTIVITY",
+            "-" * 60,
             f"Trades Executed: {self.trades_executed}",
+            f"Trades Closed:   {len(self.closed_trades)}",
         ]
         
-        if self.max_trades:
-            summary.append(f"Trade Limit: {self.max_trades}")
-        if self.duration_hours:
-            summary.append(f"Duration Limit: {self.duration_hours} hours")
-            
-        summary.append("=" * 50)
+        if self.closed_trades:
+            summary.extend([
+                f"Win Rate:        {win_rate:.1f}% ({wins}W / {losses}L)",
+                "",
+                "CLOSED TRADES P&L",
+                "-" * 60,
+                f"Total Realized:  ${closed_pnl:+,.2f}",
+                f"Average Win:     ${avg_win:+,.2f}",
+                f"Average Loss:    ${avg_loss:+,.2f}",
+                f"Largest Win:     ${largest_win:+,.2f}",
+                f"Largest Loss:    ${largest_loss:+,.2f}",
+            ])
+        
+        # Opening positions
+        if self.opening_positions:
+            summary.extend([
+                "",
+                "OPENING POSITIONS",
+                "-" * 60,
+            ])
+            for pos in self.opening_positions:
+                summary.append(
+                    f"  {pos['symbol']:20s} {pos['side']:5s} {pos['qty']:>8.0f} @ ${pos['entry_price']:>8.2f} "
+                    f"| Value: ${pos['market_value']:>10,.2f} | P&L: ${pos['unrealized_pl']:>+10,.2f}"
+                )
+        
+        # Closing positions
+        if closing_positions:
+            summary.extend([
+                "",
+                "CLOSING POSITIONS",
+                "-" * 60,
+            ])
+            for pos in closing_positions:
+                summary.append(
+                    f"  {pos['symbol']:20s} {pos['side']:5s} {pos['qty']:>8.0f} @ ${pos['entry_price']:>8.2f} "
+                    f"| Current: ${pos['current_price']:>8.2f} | P&L: ${pos['unrealized_pl']:>+10,.2f} ({pos['unrealized_plpc']*100:+.2f}%)"
+                )
+        
+        # Limits
+        if self.max_trades or self.duration_hours:
+            summary.extend([
+                "",
+                "SESSION LIMITS",
+                "-" * 60,
+            ])
+            if self.max_trades:
+                summary.append(f"Trade Limit:     {self.max_trades}")
+            if self.duration_hours:
+                summary.append(f"Duration Limit:  {self.duration_hours} hours")
+        
+        summary.append("=" * 60)
         return "\n".join(summary)
     
     def request_stop(self):
