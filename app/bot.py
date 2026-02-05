@@ -382,7 +382,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
     
     # Determine the cap to use
     if daily_cap_value is None:
-        cap_limit = 5  # Default cap
+        cap_limit = getattr(config, 'DEFAULT_DAILY_CAP', 5)  # Use config or fallback to 5
     else:
         cap_limit = daily_cap_value
     
@@ -519,7 +519,8 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
                 # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
-                total_budget = equity * 0.10
+                budget_pct = getattr(config, 'OPTIONS_BUDGET_PCT', 0.10)
+                total_budget = equity * budget_pct
                 
                 # Fetch all current positions to sum existing option exposure
                 all_positions = trade_client.get_all_positions()

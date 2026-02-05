@@ -40,3 +40,7 @@ except Exception:
     ACCOUNT_BALANCE = 10000 # Fallback for local testing without keys
 
 ENABLE_OPTIONS = False # Set to True to trade options instead of shares
+
+# --- OPTION RISK MANAGEMENT ---
+OPTIONS_BUDGET_PCT = 0.20 # Percentage of balance (or budget) per trade
+DEFAULT_DAILY_CAP = 5    # Default daily trade cap if none provided
