@@ -25,7 +25,7 @@ RISK_PER_TRADE = config.RISK_PER_TRADE
 
 # ================= CLIENTS =================
 
-ib = ibkr_mgr.get_client()
+# Global ib is replaced by dynamic ibkr_mgr.ib in functions
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -44,7 +44,7 @@ async def get_bars(symbol, timeframe, limit):
     contract = Stock(symbol, 'SMART', 'USD')
     
     # Using reqHistoricalDataAsync for non-blocking fetch
-    bars = await ib.reqHistoricalDataAsync(
+    bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
         contract,
         endDateTime='',
         durationStr='2 D',
@@ -220,11 +220,11 @@ async def generate_signal(symbol=None):
         symbol = SYMBOL
         
     try:
-        # We now use await for get_bars and pass simple strings
-        htf = await get_bars(symbol, "15Min", 200)
-        ltf = await get_bars(symbol, "1Min", 200)
+        # Fetch bars for both timeframes
+        htf_df = await get_bars(symbol, config.TIMEFRAME_HTF, 200)
+        ltf_df = await get_bars(symbol, config.TIMEFRAME_LTF, 200)
         
-        if htf.empty or ltf.empty:
+        if htf_df.empty or ltf_df.empty:
             print(f"Not enough data fetched for {symbol}.")
             return None
 
@@ -232,7 +232,7 @@ async def generate_signal(symbol=None):
         print(f"Error fetching data for {symbol}: {e}")
         return None
 
-    return get_strategy_signal(htf, ltf)
+    return get_strategy_signal(htf_df, ltf_df)
 
 # ================= RISK =================
 
@@ -245,7 +245,7 @@ async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_overri
     try:
         # In ib_insync, account values are stored in 'accountValues'
         # NetLiquidation is usually the equity.
-        acc_values = ib.accountValues()
+        acc_values = ibkr_mgr.ib.accountValues()
         equity = 10000.0
         buying_power = 10000.0
         
@@ -281,7 +281,7 @@ async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_overri
     current_exposure = 0.0
     try:
         # ib.positions() returns a list of Position objects
-        positions = ib.positions()
+        positions = ibkr_mgr.ib.positions()
         for p in positions:
             # We identify the ticker by checking contract.symbol
             if p.contract.symbol == symbol and isinstance(p.contract, Stock):
@@ -311,6 +311,7 @@ from alpaca.trading.requests import GetOptionContractsRequest
 from alpaca.trading.enums import AssetStatus, ContractType
 
 async def get_best_option_contract(symbol, signal_type, known_price=None):
+    ib = ibkr_mgr.ib
     """
     Finds the best option contract using IBKR reqContractDetails.
     """
@@ -349,26 +350,21 @@ def get_current_position(symbol):
     """
     Returns the current position for the given symbol from the live list.
     """
-    positions = ib.positions()
+    positions = ibkr_mgr.ib.positions()
     for p in positions:
         if p.contract.symbol == symbol:
             return p
     return None
 
-def cancel_all_orders_for_symbol(symbol):
-    """
-    Cancels all open orders for a specific symbol in IBKR.
-    """
-    try:
-        trades = ib.openTrades()
-        for t in trades:
-            if t.contract.symbol == symbol:
-                ib.cancelOrder(t.order)
-                print(f"Cancelled order for {symbol}")
-    except Exception as e:
-        print(f"⚠️ Error cancelling orders: {e}")
+async def cancel_all_orders_for_symbol(symbol):
+    open_trades = ibkr_mgr.ib.openTrades()
+    for t in open_trades:
+        if t.contract.symbol == symbol:
+            ibkr_mgr.ib.cancelOrder(t.order)
+            print(f"Cancelled order for {symbol}")
 
-async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, stock_budget_override=None, option_budget_override=None):
+    ib = ibkr_mgr.ib
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -625,6 +621,7 @@ def parse_option_expiry(symbol):
     return None
 
 async def manage_option_expiry():
+    ib = ibkr_mgr.ib
     """
     Checks all open option positions for expiry in IBKR.
     """
@@ -681,6 +678,7 @@ def save_trade_state(state):
         print(f"⚠️ Error saving state: {e}")
 
 async def manage_trade_updates():
+    ib = ibkr_mgr.ib
     """
     Asynchronous trade updates for IBKR (Hybrid Trailing SL).
     """
@@ -691,8 +689,17 @@ async def manage_trade_updates():
             if symbol != SYMBOL: continue
             
             ticker = ib.ticker(p.contract)
+            if not ticker:
+                print(f"DEBUG: No ticker found for {p.contract.localSymbol}. Requesting market data...")
+                ib.reqMktData(p.contract)
+                continue
+                
             curr_price = ticker.marketPrice()
-            if not curr_price or curr_price <= 0: continue
+            if not curr_price or curr_price <= 0 or np.isnan(curr_price):
+                # Fallback for delayed data
+                curr_price = ticker.last if ticker.last > 0 else ticker.close
+                
+            if not curr_price or curr_price <= 0 or np.isnan(curr_price): continue
             
             avg_cost = p.avgCost
             if avg_cost <= 0: continue
@@ -793,6 +800,7 @@ class TradingSession:
     """Manages trading session state and statistics."""
     
     def __init__(self, duration_hours=None, max_trades=None):
+        ib = ibkr_mgr.ib
         self.start_time = datetime.now()
         self.duration_hours = duration_hours
         self.max_trades = max_trades
@@ -803,18 +811,6 @@ class TradingSession:
         self.opening_equity = None
         self.opening_positions = []
         self.closed_trades = []  # List of dicts with {symbol, pnl, win}
-        
-        def __init__(self, duration_hours=None, max_trades=None):
-        self.start_time = datetime.now()
-        self.duration_hours = duration_hours
-        self.max_trades = max_trades
-        self.trades_executed = 0
-        self.should_stop = False
-        
-        # Enhanced tracking
-        self.opening_equity = None
-        self.opening_positions = []
-        self.closed_trades = []
         
         # Capture opening state
         try:
@@ -869,6 +865,7 @@ class TradingSession:
         return True
     
     def get_summary(self):
+        ib = ibkr_mgr.ib
         """Get session summary statistics."""
         elapsed = datetime.now() - self.start_time
         hours = int(elapsed.total_seconds() // 3600)
@@ -1091,9 +1088,9 @@ async def main():
     except KeyboardInterrupt:
         session.request_stop()
     finally:
-        ibkr_mgr.disconnect()
         print("\n")
         print(session.get_summary())
+        ibkr_mgr.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())

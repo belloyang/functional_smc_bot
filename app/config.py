@@ -10,6 +10,12 @@ def load_env(file_path=".env"):
                 if not line or line.startswith("#"):
                     continue
                 if "=" in line:
+                    # Remove inline comments
+                    if " #" in line: # Only split if there's a space before # to avoid issues with values containing #
+                        line = line.split(" #", 1)[0]
+                    elif line.startswith("#"):
+                        continue
+                        
                     key, value = line.split("=", 1)
                     # Clean up key and value (remove spaces and quotes)
                     key = key.strip()
@@ -21,7 +27,7 @@ load_env()
 
 # --- IBKR SETTINGS ---
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
-IBKR_PORT = int(os.getenv("IBKR_PORT", 7497)) # 7497 for paper, 7496 for live
+IBKR_PORT = int(os.getenv("IBKR_PORT", "7497")) # 7497 for paper, 7496 for live
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", 1))
 
 # --- ALPACA (BACKWARD COMPATIBILITY) ---
