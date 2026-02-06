@@ -828,6 +828,29 @@ async def manage_trade_updates():
     except Exception:
         pass
 
+def is_market_open():
+    """
+    Checks if US markets are currently open (9:30 AM - 4:00 PM ET, Mon-Fri).
+    Returns (bool, status_message)
+    """
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    
+    # Weekend Check
+    if now_et.weekday() >= 5:
+        return False, "Market is CLOSED (Weekend)"
+    
+    # Time Check
+    current_time = now_et.time()
+    market_open = datetime.strptime("09:30:00", "%H:%M:%S").time()
+    market_close = datetime.strptime("16:00:00", "%H:%M:%S").time()
+    
+    if current_time < market_open:
+        return False, "Market is CLOSED (Pre-Market)"
+    if current_time > market_close:
+        return False, "Market is CLOSED (After-Hours)"
+        
+    return True, "Market is OPEN"
+
 # ================= SESSION MANAGEMENT =================
 
 class TradingSession:
@@ -1088,11 +1111,11 @@ async def main():
                 await manage_option_expiry()
                 await manage_trade_updates()
                 
-                # 1. Market Hours Filter (Simple check)
-                now_et = datetime.now(ZoneInfo("America/New_York"))
-                if now_et.weekday() >= 5:
-                    print("Market is CLOSED (Weekend). Waiting 1 hour...")
-                    await interruptible_sleep(3600, session)
+                # 1. Market Hours Filter
+                is_open, status_msg = is_market_open()
+                if not is_open:
+                    print(f"🕒 {status_msg}. Waiting 15 minutes...")
+                    await interruptible_sleep(900, session)
                     continue
 
                 # 2. Market is open, look for signals
