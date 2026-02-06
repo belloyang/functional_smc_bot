@@ -44,12 +44,13 @@ async def get_bars(symbol, timeframe, limit):
     contract = Stock(symbol, 'SMART', 'USD')
     
     # Using reqHistoricalDataAsync for non-blocking fetch
+    # Using 'MIDPOINT' which is often available without a full subscription
     bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
         contract,
         endDateTime='',
         durationStr='2 D',
         barSizeSetting=bar_size,
-        whatToShow='TRADES',
+        whatToShow='MIDPOINT',
         useRTH=True,
         formatDate=1,
         keepUpToDate=False
@@ -67,6 +68,18 @@ async def get_bars(symbol, timeframe, limit):
         df = df.iloc[-limit:]
         
     return df
+
+async def get_latest_price_fallback(symbol):
+    """
+    Fetches the latest close price from historical data if real-time ticker fails.
+    """
+    try:
+        df = await get_bars(symbol, "1Min", 1)
+        if not df.empty:
+            return float(df['close'].iloc[-1])
+    except Exception as e:
+        print(f"Error in price fallback for {symbol}: {e}")
+    return None
 
 # ================= SMC LOGIC (CAUSAL) =================
 
@@ -495,7 +508,12 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                 ib.sleep(0.5) # Wait for tick
                 entry_est = ticker.ask if ticker.ask > 0 else ticker.last
                 
-                if not entry_est or entry_est <= 0:
+                if not entry_est or entry_est <= 0 or np.isnan(entry_est):
+                    # For options, MIDPOINT historical data via get_bars might not work without subscription
+                    # but we try ticker.marketPrice() as a last resort
+                    entry_est = ticker.marketPrice()
+                    
+                if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
                     
@@ -689,15 +707,22 @@ async def manage_trade_updates():
             if symbol != SYMBOL: continue
             
             ticker = ib.ticker(p.contract)
-            if not ticker:
-                print(f"DEBUG: No ticker found for {p.contract.localSymbol}. Requesting market data...")
+            # Only request if not already streaming (checking all tickers)
+            if ticker not in ib.tickers():
+                print(f"DEBUG: Starting data stream for {p.contract.localSymbol}...")
                 ib.reqMktData(p.contract)
-                continue
+            
+            if not ticker: continue
                 
             curr_price = ticker.marketPrice()
             if not curr_price or curr_price <= 0 or np.isnan(curr_price):
                 # Fallback for delayed data
                 curr_price = ticker.last if ticker.last > 0 else ticker.close
+            
+            if not curr_price or curr_price <= 0 or np.isnan(curr_price):
+                # Final fallback to historical MIDPOINT
+                print(f"ℹ️ Market Data (Error 10089) - Falling back to Historical MIDPOINT for {symbol}...")
+                curr_price = await get_latest_price_fallback(symbol)
                 
             if not curr_price or curr_price <= 0 or np.isnan(curr_price): continue
             
