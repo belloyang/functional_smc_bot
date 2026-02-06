@@ -505,7 +505,7 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
             try:
                 # Fetch Current Option Price (Tick)
                 ticker = ib.ticker(opt_contract)
-                ib.sleep(0.5) # Wait for tick
+                await asyncio.sleep(0.5) # Wait for tick
                 entry_est = ticker.ask if ticker.ask > 0 else ticker.last
                 
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
