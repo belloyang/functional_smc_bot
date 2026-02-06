@@ -48,7 +48,7 @@ async def get_bars(symbol, timeframe, limit):
     bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
         contract,
         endDateTime='',
-        durationStr='2 D',
+        durationStr='1 W',
         barSizeSetting=bar_size,
         whatToShow='MIDPOINT',
         useRTH=True,
