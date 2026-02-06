@@ -506,6 +506,11 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                 # Fetch Current Option Price (Tick)
                 ticker = ib.ticker(opt_contract)
                 await asyncio.sleep(0.5) # Wait for tick
+                
+                if not ticker:
+                    print(f"❌ Ticker not found for {opt_contract.localSymbol}. Skipping.")
+                    return
+                    
                 entry_est = ticker.ask if ticker.ask > 0 else ticker.last
                 
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
@@ -517,8 +522,9 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
                     
-                sl_price = round(entry_est * 0.80, 2)
-                tp_price = round(entry_est * 1.50, 2)
+                entry_est = float(entry_est)
+                sl_price = float(round(entry_est * 0.80, 2))
+                tp_price = float(round(entry_est * 1.50, 2))
                 
                 print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} | TP: {tp_price}")
                 
@@ -557,6 +563,7 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                 action = 'BUY'
                 bracket = ib.bracketOrder(action, qty, entry_est, tp_price, sl_price)
                 for o in bracket:
+                    o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(opt_contract, o)
                 
                 print(f"✅ OPTION BRACKET SUBMITTED: {opt_contract.localSymbol}")
@@ -574,10 +581,9 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
     # --- STOCK TRADING LOGIC ---
     if signal == "buy":
         if qty_held == 0:
-            swing_low = get_last_swing_low(price_df, window=5)
-            sl_price = swing_low if swing_low and swing_low < price else price * 0.995
-            risk_dist = price - sl_price
-            tp_price = price + (risk_dist * 2.5)
+            price = float(price)
+            sl_price = float(round(price * 0.95, 2))
+            tp_price = float(round(price * 1.125, 2))
             
             qty = await calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
             if qty <= 0: return
@@ -586,8 +592,9 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
             
             try:
                 contract = Stock(symbol, 'SMART', 'USD')
-                bracket = ib.bracketOrder('BUY', qty, price, round(tp_price, 2), round(sl_price, 2))
+                bracket = ib.bracketOrder('BUY', qty, price, tp_price, sl_price)
                 for o in bracket:
+                    o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(contract, o)
                 
                 print("✅ BUY BRACKET ORDER SUBMITTED")
@@ -726,7 +733,8 @@ async def manage_trade_updates():
                 
             if not curr_price or curr_price <= 0 or np.isnan(curr_price): continue
             
-            avg_cost = p.avgCost
+            curr_price = float(curr_price)
+            avg_cost = float(p.avgCost)
             if avg_cost <= 0: continue
             
             is_long = (p.position > 0)
@@ -783,11 +791,11 @@ async def manage_trade_updates():
             curr_stop = stop_order_trade.order.auxPrice
             new_stop = None
             
-            if pl_pct > 0.30: # Lock 15%
-                target_stop = avg_cost * 1.15 if is_long else avg_cost * 0.85
+            if pl_pct > 0.09: # Lock 5%
+                target_stop = avg_cost * 1.05 if is_long else avg_cost * 0.95
                 if (is_long and curr_stop < target_stop) or (not is_long and curr_stop > target_stop):
                     new_stop = target_stop
-            elif pl_pct > 0.15: # Break Even
+            elif pl_pct > 0.05: # Break Even
                 target_stop = avg_cost
                 if (is_long and curr_stop < target_stop) or (not is_long and curr_stop > target_stop):
                     new_stop = target_stop
@@ -805,8 +813,8 @@ async def manage_trade_updates():
     
     # Final Cleanup: Remove state for any symbols we no longer hold
     try:
-        current_positions = trade_client.get_all_positions()
-        held_symbols = {p.symbol for p in current_positions}
+        current_positions = ib.positions()
+        held_symbols = {p.contract.symbol for p in current_positions}
         state = load_trade_state()
         state_symbols = list(state.keys())
         cleaned = False
