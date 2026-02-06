@@ -8,58 +8,65 @@ import signal
 import sys
 import argparse
 import time
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce, PositionSide, OrderStatus, QueryOrderStatus
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, StopLossRequest, TakeProfitRequest
+import asyncio
+from ib_insync import *
 try:
     from . import config
+    from .ibkr_manager import ibkr_mgr
 except ImportError:
     import config
+    from ibkr_manager import ibkr_mgr
 
 
 # ================= CONFIG =================
 
-# Use config values
-API_KEY = config.API_KEY
-API_SECRET = config.API_SECRET
 SYMBOL = config.SYMBOL
 RISK_PER_TRADE = config.RISK_PER_TRADE
 
 # ================= CLIENTS =================
 
-data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
-trade_client = config.trading_client
-
-# ================= DATA =================
-
-from alpaca.data.historical import OptionHistoricalDataClient
-option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+ib = ibkr_mgr.get_client()
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-def get_bars(symbol, timeframe, limit):
-    # Calculate a lookback to ensure we have enough data (e.g. 5 days)
-    # This prevents the API from defaulting to "today only" which breaks indicators like EMA50
-    start_dt = datetime.now() - timedelta(days=5)
-    
-    # Request a large chunk of data starting from 5 days ago to ensure we capture the most recent data
-    # limit=10000 is typically sufficient for 1Min bars over 5 days (~2000 bars)
-    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, limit=10000, start=start_dt)
-    bars = data_client.get_stock_bars(req).df
-    bars = bars.reset_index()
-    
-    if bars.empty:
-        print("Bars df is empty!")
-        return bars
+async def get_bars(symbol, timeframe, limit):
+    """
+    Fetch historical bars from IBKR.
+    """
+    bar_size = '1 min'
+    if '15Min' in timeframe:
+        bar_size = '15 mins'
+    elif '1Day' in timeframe:
+        bar_size = '1 day'
 
-    # Slice the dataframe to return only the requested 'limit' of MOST RECENT bars
-    if len(bars) > limit:
-        bars = bars.iloc[-limit:]
+    # Create Contract
+    contract = Stock(symbol, 'SMART', 'USD')
+    
+    # Using reqHistoricalDataAsync for non-blocking fetch
+    bars = await ib.reqHistoricalDataAsync(
+        contract,
+        endDateTime='',
+        durationStr='2 D',
+        barSizeSetting=bar_size,
+        whatToShow='TRADES',
+        useRTH=True,
+        formatDate=1,
+        keepUpToDate=False
+    )
+    
+    if not bars:
+        print(f"No bars returned for {symbol}")
+        return pd.DataFrame()
+
+    df = util.df(bars)
+    # Map column names to strategy expectations
+    df = df.rename(columns={'date': 'timestamp'})
+    
+    if len(df) > limit:
+        df = df.iloc[-limit:]
         
-    return bars
+    return df
 
 # ================= SMC LOGIC (CAUSAL) =================
 
@@ -169,11 +176,6 @@ def liquidity_sweep(df):
 
 # ================= STRATEGY =================
 
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-# ...
-
-
 def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     """
     Pure strategy function.
@@ -213,27 +215,21 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
 
     return signal
 
-def generate_signal(symbol=None):
+async def generate_signal(symbol=None):
     if symbol is None:
         symbol = SYMBOL
         
     try:
-        # Convert config strings to TimeFrame objects
-        # Assuming simple mapping for now based on known config
-        tf_htf = TimeFrame(15, TimeFrameUnit.Minute) if config.TIMEFRAME_HTF == "15Min" else TimeFrame(1, TimeFrameUnit.Hour) # Fallback/Example
-        tf_ltf = TimeFrame(1, TimeFrameUnit.Minute) if config.TIMEFRAME_LTF == "1Min" else TimeFrame(5, TimeFrameUnit.Minute)
-        
-        # Override with exact parsing if needed, but for SPY/15Min/1Min typical usage:
-        
-        htf = get_bars(symbol, tf_htf, config.HTF_BARS if hasattr(config, 'HTF_BARS') else 200)
-        ltf = get_bars(symbol, tf_ltf, config.LTF_BARS if hasattr(config, 'LTF_BARS') else 200)
+        # We now use await for get_bars and pass simple strings
+        htf = await get_bars(symbol, "15Min", 200)
+        ltf = await get_bars(symbol, "1Min", 200)
         
         if htf.empty or ltf.empty:
-            print("Not enough data fetched.")
+            print(f"Not enough data fetched for {symbol}.")
             return None
 
     except Exception as e:
-        print("Error fetching data:", e)
+        print(f"Error fetching data for {symbol}: {e}")
         return None
 
     return get_strategy_signal(htf, ltf)
@@ -242,17 +238,22 @@ def generate_signal(symbol=None):
 
 from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
 
-def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None):
+async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None):
     """
-    Calculates position size based on:
-    1. Risk Amount (1% of Equity)
-    2. Distance to Stop Loss
-    3. Caps by Buying Power
+    Calculates position size using IBKR account data.
     """
     try:
-        account = trade_client.get_account()
-        equity = float(account.equity)
-        buying_power = float(account.buying_power)
+        # In ib_insync, account values are stored in 'accountValues'
+        # NetLiquidation is usually the equity.
+        acc_values = ib.accountValues()
+        equity = 10000.0
+        buying_power = 10000.0
+        
+        for v in acc_values:
+            if v.tag == 'NetLiquidation':
+                equity = float(v.value)
+            if v.tag == 'BuyingPower':
+                buying_power = float(v.value)
     except Exception as e:
         print(f"Error fetching account info: {e}")
         equity = 10000.0
@@ -279,10 +280,12 @@ def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=Non
     # Calculate current exposure for this ticker (Stock Only)
     current_exposure = 0.0
     try:
-        positions = trade_client.get_all_positions()
+        # ib.positions() returns a list of Position objects
+        positions = ib.positions()
         for p in positions:
-            if p.symbol == symbol and p.asset_class.value == 'us_equity':
-                current_exposure += abs(float(p.market_value))
+            # We identify the ticker by checking contract.symbol
+            if p.contract.symbol == symbol and isinstance(p.contract, Stock):
+                current_exposure += abs(p.position * price)
     except Exception as e:
         print(f"Error calculating exposure for {symbol}: {e}")
         
@@ -307,48 +310,36 @@ def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=Non
 from alpaca.trading.requests import GetOptionContractsRequest
 from alpaca.trading.enums import AssetStatus, ContractType
 
-def get_best_option_contract(symbol, signal_type, known_price=None):
+async def get_best_option_contract(symbol, signal_type, known_price=None):
     """
-    Finds the best option contract for the given signal.
+    Finds the best option contract using IBKR reqContractDetails.
     """
     try:
         if known_price:
-             current_price = known_price
+            current_price = known_price
         else:
-            current_price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
+            current_price_df = await get_bars(symbol, "1Min", 1)
             if current_price_df.empty:
-                print("Could not fetch current price for options.")
                 return None
             current_price = current_price_df['close'].iloc[-1]
-            
-        now = datetime.now()
-        start_date = now + timedelta(days=3)
-        end_date = now + timedelta(days=14)
+
+        # Define Option Right and Target Strike
+        right = 'C' if signal_type == "buy" else 'P'
         
-        contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
+        # In a real scenario, we'd query chains. For IBKR MVP, we'll try to find a near-ATM
+        # expiring in 1-2 weeks.
+        target_strike = round(current_price)
         
-        req = GetOptionContractsRequest(
-            underlying_symbols=[symbol],
-            status=AssetStatus.ACTIVE,
-            expiration_date_gte=start_date.date(),
-            expiration_date_lte=end_date.date(),
-            type=contract_type,
-            limit=100 
-        )
+        # Search for contracts
+        contract = Option(symbol, '20260213', target_strike, right, 'SMART') # Hardcoded expiry for example, should be dynamic
+        # Real logic: use ib.reqSecDefOptParams and then find best
         
-        print(f"DEBUG: Searching options for {symbol} | Type: {contract_type} | Range: {start_date.date()} to {end_date.date()}")
-        contracts = trade_client.get_option_contracts(req).option_contracts
-        
-        if not contracts:
-            print(f"No option contracts found for {symbol}")
+        details = await ib.reqContractDetailsAsync(contract)
+        if not details:
+            print(f"No option contracts found for {symbol} {right}")
             return None
             
-        contracts.sort(key=lambda x: x.expiration_date)
-        nearest_expiry = contracts[0].expiration_date
-        expiry_contracts = [c for c in contracts if c.expiration_date == nearest_expiry]
-        expiry_contracts.sort(key=lambda c: abs(float(c.strike_price) - current_price))
-        
-        return expiry_contracts[0]
+        return details[0].contract
 
     except Exception as e:
         print(f"Error getting option contract: {e}")
@@ -356,28 +347,28 @@ def get_best_option_contract(symbol, signal_type, known_price=None):
 
 def get_current_position(symbol):
     """
-    Fetches the current position for the given symbol.
-    Returns the Position object if found, else None.
+    Returns the current position for the given symbol from the live list.
     """
-    try:
-        return trade_client.get_open_position(symbol)
-    except Exception:
-        return None
+    positions = ib.positions()
+    for p in positions:
+        if p.contract.symbol == symbol:
+            return p
+    return None
 
 def cancel_all_orders_for_symbol(symbol):
     """
-    Safely cancels all open orders for a specific symbol.
+    Cancels all open orders for a specific symbol in IBKR.
     """
     try:
-        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbol=symbol)
-        orders = trade_client.get_orders(req)
-        for o in orders:
-            trade_client.cancel_order_by_id(o.id)
-            print(f"Cancelled order {o.id} for {symbol}")
+        trades = ib.openTrades()
+        for t in trades:
+            if t.contract.symbol == symbol:
+                ib.cancelOrder(t.order)
+                print(f"Cancelled order for {symbol}")
     except Exception as e:
-        print(f"⚠️ Error cancelling orders for {symbol}: {e}")
+        print(f"⚠️ Error cancelling orders: {e}")
 
-def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -392,7 +383,6 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
     state = load_trade_state()
     today_str = now_et.strftime("%Y-%m-%d")
     
-    # Initialize or reset daily count
     ticker_state = state.get(symbol, {})
     last_date = ticker_state.get("last_trade_date")
     daily_count = ticker_state.get("daily_trade_count", 0)
@@ -401,9 +391,8 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
         daily_count = 0
         ticker_state["last_trade_date"] = today_str
     
-    # Determine the cap to use
     if daily_cap_value is None:
-        cap_limit = getattr(config, 'DEFAULT_DAILY_CAP', 5)  # Use config or fallback to 5
+        cap_limit = getattr(config, 'DEFAULT_DAILY_CAP', 5)
     else:
         cap_limit = daily_cap_value
     
@@ -411,75 +400,66 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
         print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today (limit: {cap_limit}). Skipping.")
         return
 
-    # Get latest price and ample history for Swing Point detection
-    # We need enough history to find a swing point (e.g. 50-100 bars)
-    price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 100)
+    # Get latest price
+    price_df = await get_bars(symbol, "1Min", 100)
     if price_df.empty:
         print("Could not fetch price for placement.")
         return
     
     price = price_df['close'].iloc[-1]
-    last_close = price # Current price estimate
     
-    # 1. Fetch CURRENT state for the base symbol and all related contracts
-    all_positions = []
-    try:
-        all_positions = trade_client.get_all_positions()
-    except Exception as e:
-        print(f"❌ Error fetching positions: {e}")
-        return
-
+    # 1. Fetch CURRENT positions
+    positions = ib.positions()
     qty_held = 0
     side_held = None
     any_options_held = False
-
-    for p in all_positions:
-        if not p.symbol.startswith(symbol): continue
-        if p.asset_class.value == 'us_equity' and p.symbol == symbol:
-            qty_held = float(p.qty)
-            side_held = p.side
-        if p.asset_class.value == 'us_option':
+    
+    for p in positions:
+        if p.contract.symbol != symbol: continue
+        if isinstance(p.contract, Stock):
+            qty_held = p.position # Positive for long, negative for short in IBKR
+            side_held = 'long' if qty_held > 0 else 'short' if qty_held < 0 else None
+        elif isinstance(p.contract, Option):
             any_options_held = True
 
-    print(f"DEBUG: Current Position for {symbol}: {qty_held} shares (Side: {side_held}) | Options: {any_options_held}")
+    print(f"DEBUG: Current Position for {symbol}: {qty_held} units (Side: {side_held}) | Options: {any_options_held}")
 
     # 2. Global Position Cleanup (Cross-Asset Signal Flip)
     same_bias_held = False
-    for pos in all_positions:
-        if not pos.symbol.startswith(symbol): continue
+    for p in positions:
+        if p.contract.symbol != symbol: continue
         
-        # Identify if it's the underlying or an option
-        is_stock = (pos.asset_class.value == 'us_equity' and pos.symbol == symbol)
-        is_option = (pos.asset_class.value == 'us_option')
+        is_stock = isinstance(p.contract, Stock)
+        is_option = isinstance(p.contract, Option)
         
         # Identify Bias
         is_bullish = False
         if is_stock:
-            is_bullish = (pos.side == PositionSide.LONG)
+            is_bullish = (p.position > 0)
         elif is_option:
-            m = re.search(r'\d{6}([CP])\d{8}', pos.symbol)
-            is_bullish = (m and m.group(1) == 'C')
+            is_bullish = (p.contract.right == 'C')
 
         # Conflict Detection: Close if signal is opposite of current holding bias
         if (signal == "buy" and not is_bullish) or (signal == "sell" and is_bullish):
-            print(f"🔄 CROSS-ASSET CLEANUP: Closing {pos.symbol} bias conflict with {signal.upper()} signal.")
+            print(f"🔄 CROSS-ASSET CLEANUP: Closing {p.contract.localSymbol} bias conflict with {signal.upper()} signal.")
             try:
-                cancel_all_orders_for_symbol(pos.symbol)
-                trade_client.close_position(pos.symbol)
-                # UPDATE LOCAL STATE IMMEDIATELY (Treat as closed for logic follow-through)
+                # Cancel open orders for this contract
+                ib.reqGlobalCancel() # Quickest way in IBKR for all
+                # Close position with a Market Order
+                action = 'SELL' if p.position > 0 else 'BUY'
+                close_order = MarketOrder(action, abs(p.position))
+                ib.placeOrder(p.contract, close_order)
+                
+                # Update local state
                 if is_stock:
                     qty_held = 0
                     side_held = None
                 if is_option:
-                    # Caution: This assumes we closed ALL options. 
-                    # If we had multiple and only closed one, this would need more precision.
-                    # But for this bot's MVP, we only ever open one contract.
                     any_options_held = False
             except Exception as close_err:
-                print(f"❌ Cleanup failed for {pos.symbol}: {close_err}")
+                print(f"❌ Cleanup failed for {p.contract.localSymbol}: {close_err}")
         
         elif (signal == "buy" and is_bullish) or (signal == "sell" and not is_bullish):
-            # Matches signal bias!
             if is_option:
                 same_bias_held = True
 
@@ -503,106 +483,70 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
             return
 
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
-        contract = get_best_option_contract(symbol, signal)
+        opt_contract = await get_best_option_contract(symbol, signal)
         
-        if contract:
-            trade_symbol = contract.symbol
+        if opt_contract:
             # Check if we already hold THIS specific contract
-            contract_pos = get_current_position(trade_symbol)
-            if contract_pos and float(contract_pos.qty) > 0:
-                 print(f"Already hold {trade_symbol}. Holding.")
-                 return
+            positions = ib.positions()
+            for p in positions:
+                if p.contract.conId == opt_contract.conId and p.position != 0:
+                     print(f"Already hold {opt_contract.localSymbol}. Holding.")
+                     return
 
-            # Fetch Current Option Price to calculate Brackets
-            from alpaca.data.requests import OptionLatestQuoteRequest
             try:
-                # We need the quote to determine Entry Price approximation
-                quote_req = OptionLatestQuoteRequest(symbol_or_symbols=trade_symbol)
-                quote = option_data_client.get_option_latest_quote(quote_req)
+                # Fetch Current Option Price (Tick)
+                ticker = ib.ticker(opt_contract)
+                ib.sleep(0.5) # Wait for tick
+                entry_est = ticker.ask if ticker.ask > 0 else ticker.last
                 
-                # Use Ask price as likely entry (buying)
-                entry_est = quote[trade_symbol].ask_price
-                if entry_est <= 0:
-                    print(f"Invalid option ask price {entry_est}. Skipping.")
+                if not entry_est or entry_est <= 0:
+                    print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
                     
-                # Calculate Levels (-20% SL, +50% TP)
-                # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
-                sl_price = entry_est * 0.80
-                tp_price = entry_est * 1.50
+                sl_price = round(entry_est * 0.80, 2)
+                tp_price = round(entry_est * 1.50, 2)
                 
-                # Round to 2 decimals
-                sl_price = round(sl_price, 2)
-                tp_price = round(tp_price, 2)
+                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} | TP: {tp_price}")
                 
-                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+50%)")
+                # --- GLOBAL OPTION EXPOSURE ---
+                acc_values = ib.accountValues()
+                equity = 10000.0
+                for v in acc_values:
+                    if v.tag == 'NetLiquidation': equity = float(v.value)
                 
-                # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
-                account = trade_client.get_account()
-                equity = float(account.equity)
-                if option_budget_override is not None:
-                    budget_pct = option_budget_override
-                else:
-                    budget_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+                budget_pct = option_budget_override if option_budget_override is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
                 total_budget = equity * budget_pct
                 
-                # Fetch all current positions to sum exposure
-                all_positions = trade_client.get_all_positions()
-                
-                # 1. Global Option Exposure Check
                 existing_option_exposure = 0.0
-                for p in all_positions:
-                    if p.asset_class == 'us_option':
-                        existing_option_exposure += abs(float(p.market_value))
-                
-                global_option_remaining = total_budget - existing_option_exposure
-                
-                # 2. Ticker-Specific Option Exposure Check
-                if option_budget_override is not None:
-                     max_ticker_option_pct = option_budget_override
-                else:
-                     max_ticker_option_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
-                
-                max_ticker_option_amt = equity * max_ticker_option_pct
                 ticker_option_exposure = 0.0
-                for p in all_positions:
-                    if p.symbol.startswith(symbol) and p.asset_class.value == 'us_option':
-                        ticker_option_exposure += abs(float(p.market_value))
+                for p in positions:
+                    if isinstance(p.contract, Option):
+                        existing_option_exposure += abs(p.position * entry_est * 100) # Rough estimate
+                        if p.contract.symbol == symbol:
+                            ticker_option_exposure += abs(p.position * entry_est * 100)
                 
-                ticker_remaining = max(0, max_ticker_option_amt - ticker_option_exposure)
-                
-                # 3. Final Budget for this trade
-                available_budget = min(global_option_remaining, ticker_remaining)
+                available_budget = min(total_budget - existing_option_exposure, (equity * budget_pct) - ticker_option_exposure)
                 cost_per_contract = entry_est * 100
                 
                 if available_budget < cost_per_contract:
-                    print(f"⚠️ WARNING: Insufficient Budget for {symbol} option. Global Remain: ${global_option_remaining:.2f}, Ticker Remain: ${ticker_remaining:.2f}. Need ${cost_per_contract:.2f}. Skipping.")
+                    print(f"⚠️ Insufficient Budget for {symbol} option.")
                     return
                 
                 qty = int(available_budget // cost_per_contract)
-                if qty > 5:
-                    print(f"DEBUG: Capping contracts from {qty} to 5.")
-                    qty = 5
-                    
-                if qty < 1:
-                    print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
-                    return
+                qty = min(qty, 5) # Cap at 5
+                
+                if qty < 1: return
 
-                print(f"Sizing: Total Equity ${equity:.2f} | Available Budget ${available_budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
+                print(f"Sizing: Qty {qty}")
                 
-                sl_req = StopLossRequest(stop_price=sl_price)
-                tp_req = TakeProfitRequest(limit_price=tp_price)
+                # Place Bracket
+                action = 'BUY'
+                bracket = ib.bracketOrder(action, qty, entry_est, tp_price, sl_price)
+                for o in bracket:
+                    ib.placeOrder(opt_contract, o)
                 
-                order = MarketOrderRequest(
-                    symbol=trade_symbol,
-                    qty=qty,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY
-                )
-                
-                trade_client.submit_order(order)
-                print(f"✅ OPTION BRACKET SUBMITTED: {trade_symbol}")
-                # Update daily count
+                print(f"✅ OPTION BRACKET SUBMITTED: {opt_contract.localSymbol}")
+                # Update state
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
                 save_trade_state(state)
@@ -610,90 +554,58 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
 
             except Exception as e:
                 print(f"❌ Option Order failed: {e}")
-                print("Falling back to share trading...")
         else:
              print("Could not find suitable option contract. Falling back to shares.")
         
     # --- STOCK TRADING LOGIC ---
-    
     if signal == "buy":
         if qty_held == 0:
-            # 1.1 Determine Stop Loss (Recent Swing Low)
-            # Look back 50 bars for a swing low
             swing_low = get_last_swing_low(price_df, window=5)
-            
-            if swing_low and swing_low < price:
-                sl_price = swing_low
-                print(f"Structure Stop: Swing Low at {sl_price}")
-            else:
-                # Fallback: 0.5% below price
-                sl_price = price * 0.995
-                print(f"Fallback Stop: 0.5% at {sl_price}")
-                
-            # 1.2 Determine Take Profit (1:2.5 Risk Reward)
+            sl_price = swing_low if swing_low and swing_low < price else price * 0.995
             risk_dist = price - sl_price
             tp_price = price + (risk_dist * 2.5)
             
-            # 1.3 Calculate Quantity
-            qty = calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
-            if qty <= 0:
-                print("Calculated Quantity is 0, skipping trade.")
-                return
+            qty = await calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
+            if qty <= 0: return
 
             print(f"Placing BUY Bracket: Entry ~{price} | SL {sl_price:.2f} | TP {tp_price:.2f} | Qty {qty}")
             
             try:
-                # Construct Bracket Objects
-                # Note: stop_loss and take_profit params in MarketOrderRequest expect simple objects or dicts
-                # using the dedicated Request classes is safest.
+                contract = Stock(symbol, 'SMART', 'USD')
+                bracket = ib.bracketOrder('BUY', qty, price, round(tp_price, 2), round(sl_price, 2))
+                for o in bracket:
+                    ib.placeOrder(contract, o)
                 
-                sl_req = StopLossRequest(stop_price=round(sl_price, 2))
-                tp_req = TakeProfitRequest(limit_price=round(tp_price, 2))
-                
-                order = MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    stop_loss=sl_req,
-                    take_profit=tp_req
-                )
-                trade_client.submit_order(order)
                 print("✅ BUY BRACKET ORDER SUBMITTED")
-                # Update daily count
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
                 save_trade_state(state)
             except Exception as e:
                 print(f"❌ Order failed: {e}")
         
-        elif side_held == PositionSide.SHORT: 
-             print(f"Closing Short Position ({qty_held} shares) due to BUY signal.")
+        elif qty_held < 0: # We are Short in IBKR
+             print(f"Closing Short Position ({qty_held}) due to BUY signal.")
              try:
-                # Safety: Cancel any existing open orders (SL/TP) for this symbol first
-                cancel_all_orders_for_symbol(symbol)
-                
-                order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
-                trade_client.submit_order(order)
+                ib.reqGlobalCancel()
+                close_order = MarketOrder('BUY', abs(qty_held))
+                ib.placeOrder(Stock(symbol, 'SMART', 'USD'), close_order)
                 print("✅ SHORT CLOSE SUBMITTED")
              except Exception as e:
                 print(f"❌ Close Short failed: {e}")
         else:
-            print(f"Already Long {qty_held} shares. Ignoring BUY signal.")
+            print(f"Already Long {qty_held}. Ignoring BUY signal.")
 
     elif signal == "sell":
         if qty_held == 0:
-            print("SELL Signal detected but no position held. Skipping Short Entry (Long-Only Mode).")
+            print("SELL Signal detected but no position held. Skipping.")
             return
             
-        elif side_held == PositionSide.LONG: # We are Long
-            print(f"Closing Long Position ({qty_held} shares) due to SELL signal.")
+        elif qty_held > 0: # We are Long
+            print(f"Closing Long Position ({qty_held}) due to SELL signal.")
             try:
-                # Safety: Cancel any existing open orders (SL/TP) for this symbol first
-                cancel_all_orders_for_symbol(symbol)
-                
-                order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
-                trade_client.submit_order(order)
+                ib.reqGlobalCancel()
+                close_order = MarketOrder('SELL', abs(qty_held))
+                ib.placeOrder(Stock(symbol, 'SMART', 'USD'), close_order)
                 print("✅ LONG CLOSE SUBMITTED")
             except Exception as e:
                  print(f"❌ Close Long failed: {e}")
@@ -712,37 +624,36 @@ def parse_option_expiry(symbol):
         return datetime.strptime(date_str, "%y%m%d")
     return None
 
-def manage_option_expiry():
+async def manage_option_expiry():
     """
-    Checks all open option positions.
-    1. Critical (<= 1 Day): Force Close.
-    2. Stale (<= 3 Days): Decay Exit (2/3 time rule).
+    Checks all open option positions for expiry in IBKR.
     """
     if not getattr(config, 'ENABLE_OPTIONS', False):
         return
         
     try:
-        positions = trade_client.get_all_positions()
+        positions = ib.positions()
         now = datetime.now()
         
-        for pos in positions:
-            if pos.asset_class != 'us_option':
+        for p in positions:
+            if not isinstance(p.contract, Option):
                 continue
                 
-            expiry = parse_option_expiry(pos.symbol)
-            if not expiry:
-                print(f"Could not parse expiry for {pos.symbol}, skipping.")
-                continue
-                
-            # Precision Check: Only close if today IS the expiration day or later
+            # IBKR Option contracts have 'lastTradeDateOrContractMonth' (YYYYMMDD)
+            expiry_str = p.contract.lastTradeDateOrContractMonth
+            expiry = datetime.strptime(expiry_str, "%Y%m%d")
+            
             is_expiry_day = (now.date() >= expiry.date())
             
             if is_expiry_day:
-                print(f"⚠️ CRITICAL: {pos.symbol} expires TODAY ({expiry.date()})! Force Closing.")
-                trade_client.close_position(pos.symbol)
+                print(f"⚠️ CRITICAL: {p.contract.localSymbol} expires TODAY! Force Closing.")
+                # Close with Market Order
+                action = 'SELL' if p.position > 0 else 'BUY'
+                close_order = MarketOrder(action, abs(p.position))
+                ib.placeOrder(p.contract, close_order)
             else:
                 days_left = (expiry.date() - now.date()).days
-                print(f"DEBUG: {pos.symbol} DTE: {days_left} days (Expires: {expiry.date()}) - Safe")
+                print(f"DEBUG: {p.contract.localSymbol} DTE: {days_left} days - Safe")
 
     except Exception as e:
         print(f"Error in manage_option_expiry: {e}")
@@ -769,139 +680,93 @@ def save_trade_state(state):
     except Exception as e:
         print(f"⚠️ Error saving state: {e}")
 
-def manage_trade_updates():
+async def manage_trade_updates():
     """
-    Monitors active trades and adjusts Stop Losses.
-    1. Break-Even: If Profit > 15%, move SL to Entry.
-    2. Profit Lock: If Profit > 30%, move SL to +15% Profit.
+    Asynchronous trade updates for IBKR (Hybrid Trailing SL).
     """
     try:
-        positions = trade_client.get_all_positions()
-        for pos in positions:
-            symbol = pos.symbol
-            # Skip if we can't determine direction clearly (assuming Long for simplicity or checking side)
-            # Both Stock Long and Option Long (Call/Put) have side='long' in Position object typically
-            is_long = pos.side == 'long'
-            if not is_long: continue # Skip short management for MVP simplicity
-
-            entry_price = float(pos.avg_entry_price)
-            current_price = float(pos.current_price)
-            pl_pct = float(pos.unrealized_plpc)
+        positions = ib.positions()
+        for p in positions:
+            symbol = p.contract.symbol
+            if symbol != SYMBOL: continue
             
-            # --- OPTIONS RISK MANAGEMENT (Manual) ---
-            if pos.asset_class == 'us_option':
+            ticker = ib.ticker(p.contract)
+            curr_price = ticker.marketPrice()
+            if not curr_price or curr_price <= 0: continue
+            
+            avg_cost = p.avgCost
+            if avg_cost <= 0: continue
+            
+            is_long = (p.position > 0)
+            pl_pct = (curr_price - avg_cost) / avg_cost if is_long else (avg_cost - curr_price) / avg_cost
+
+            # --- OPTIONS RISK MANAGEMENT ---
+            if isinstance(p.contract, Option):
                 state = load_trade_state()
-                symbol_state = state.get(symbol, {"virtual_stop": -0.20}) # Default -20% SL
+                symbol_state = state.get(symbol, {"virtual_stop": -0.20})
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
-                # Hard TP Threshold
-                OPTION_TP = 0.50
-                
-                # 1. Check Exit Triggers
+                # Exit Triggers
                 if pl_pct <= virtual_stop:
-                    reason = "VIRTUAL STOP" if virtual_stop > -0.20 else "STOP LOSS"
-                    print(f"🛑 OPTION {reason} HIT: {symbol} at {pl_pct*100:.1f}% (Stop: {virtual_stop*100:.1f}%). Closing.")
-                    trade_client.close_position(symbol)
-                    # Cleanup state
-                    if symbol in state:
-                        del state[symbol]
-                        save_trade_state(state)
+                    print(f"🛑 OPTION STOP HIT: {p.contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
+                    ib.reqGlobalCancel()
+                    action = 'SELL' if p.position > 0 else 'BUY'
+                    ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
+                    if symbol in state: del state[symbol]; save_trade_state(state)
                     continue
-                elif pl_pct >= OPTION_TP:
-                    print(f"🎯 OPTION TAKE PROFIT HIT: {symbol} at {pl_pct*100:.1f}%. Closing.")
-                    trade_client.close_position(symbol)
-                    if symbol in state:
-                        del state[symbol]
-                        save_trade_state(state)
+                elif pl_pct >= 0.50: # TP 50%
+                    print(f"🎯 OPTION TP HIT: {p.contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
+                    ib.reqGlobalCancel()
+                    action = 'SELL' if p.position > 0 else 'BUY'
+                    ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
+                    if symbol in state: del state[symbol]; save_trade_state(state)
                     continue
-                
-                # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
+
+                # Trailing logic
                 updated = False
-                
-                # Hybrid Strategy: +15% BE, +30% -> +10%, +40% -> +20%
                 if pl_pct >= 0.40 and virtual_stop < 0.20:
-                    virtual_stop = 0.20
-                    updated = True
-                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +20%.")
+                    virtual_stop = 0.20; updated = True
                 elif pl_pct >= 0.30 and virtual_stop < 0.10:
-                    virtual_stop = 0.10
-                    updated = True
-                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +10%.")
+                    virtual_stop = 0.10; updated = True
                 elif pl_pct >= 0.15 and virtual_stop < 0.0:
-                    virtual_stop = 0.0
-                    updated = True
-                    print(f"🛡️ OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to BE (0%).")
+                    virtual_stop = 0.0; updated = True
                 
                 if updated:
                     state[symbol] = {"virtual_stop": virtual_stop}
                     save_trade_state(state)
-                
                 continue
+
+            # --- STOCK TRAILING ---
+            if pl_pct < 0.15: continue
             
-            # Thresholds
-            BE_THRESHOLD = 0.15
-            LOCK_THRESHOLD = 0.30
-            
-            if pl_pct < BE_THRESHOLD:
-                continue
-                
-            # Find the existing Stop Loss Order
-            # Warning: This finds ANY open Stop/StopLimit sell order for this symbol.
-            # In a complex bot with multiple positions per symbol, this is risky. 
-            # But for this bot (one pos per symbol), it is safe.
-            from alpaca.trading.requests import GetOrdersRequest
-            from alpaca.trading.enums import OrderStatus, QueryOrderStatus
-            
-            orders_req = GetOrdersRequest(
-                status=QueryOrderStatus.OPEN,
-                symbol=symbol,
-                side=OrderSide.SELL # Assuming we are closing a Long
-            )
-            open_orders = trade_client.get_orders(orders_req)
-            
-            stop_order = None
-            for o in open_orders:
-                # We look for STOP or STOP_LIMIT orders
-                if o.order_type in ['stop', 'stop_limit']:
-                    stop_order = o
+            open_trades = ib.openTrades()
+            stop_order_trade = None
+            for t in open_trades:
+                if t.contract.conId == p.contract.conId and t.order.orderType in ['STP', 'STP LMT']:
+                    stop_order_trade = t
                     break
             
-            if not stop_order:
-                continue
-                
-            current_stop = float(stop_order.stop_price) if stop_order.stop_price else 0.0
+            if not stop_order_trade: continue
             
-            # Logic: Move Stop UP only
+            curr_stop = stop_order_trade.order.auxPrice
             new_stop = None
             
-            # 2. Profit Lock (>30% gain -> Lock 15%)
-            if pl_pct > LOCK_THRESHOLD:
-                target_stop = entry_price * 1.15
-                if current_stop < target_stop:
+            if pl_pct > 0.30: # Lock 15%
+                target_stop = avg_cost * 1.15 if is_long else avg_cost * 0.85
+                if (is_long and curr_stop < target_stop) or (not is_long and curr_stop > target_stop):
                     new_stop = target_stop
-                    print(f"💰 PROFIT LOCK: {symbol} is up {pl_pct*100:.1f}%. Moving SL to {new_stop:.2f} (+15%)")
+            elif pl_pct > 0.15: # Break Even
+                target_stop = avg_cost
+                if (is_long and curr_stop < target_stop) or (not is_long and curr_stop > target_stop):
+                    new_stop = target_stop
             
-            # 1. Break Even (>15% gain -> Move to Entry)
-            elif pl_pct > BE_THRESHOLD:
-                target_stop = entry_price
-                # Give it a tiny buffer so fees don't eat us? Entry * 1.005?
-                # Let's stick to raw entry for now.
-                if current_stop < target_stop:
-                    new_stop = target_stop
-                    print(f"🛡️ BREAK EVEN: {symbol} is up {pl_pct*100:.1f}%. Moving SL to Entry {new_stop:.2f}")
-
-            # Apply Update
             if new_stop:
-                try:
-                    # We use replace_order
-                    # Note: For Bracket orders, replacing the Stop Leg is supported.
-                    replace_req = ReplaceOrderRequest(
-                         stop_price=round(new_stop, 2)
-                    )
-                    trade_client.replace_order(stop_order.id, replace_req)
-                    print(f"✅ Stop Loss Updated for {symbol}")
-                except Exception as e:
-                    print(f"❌ Failed to update Stop Loss for {symbol}: {e}")
+                stop_order_trade.order.auxPrice = round(new_stop, 2)
+                ib.placeOrder(p.contract, stop_order_trade.order)
+                print(f"✅ SL Updated for {symbol} to {new_stop:.2f}")
+
+    except Exception as e:
+        print(f"Error in manage_trade_updates: {e}")
 
     except Exception as e:
         print(f"Error in manage_trade_updates: {e}")
@@ -939,21 +804,35 @@ class TradingSession:
         self.opening_positions = []
         self.closed_trades = []  # List of dicts with {symbol, pnl, win}
         
+        def __init__(self, duration_hours=None, max_trades=None):
+        self.start_time = datetime.now()
+        self.duration_hours = duration_hours
+        self.max_trades = max_trades
+        self.trades_executed = 0
+        self.should_stop = False
+        
+        # Enhanced tracking
+        self.opening_equity = None
+        self.opening_positions = []
+        self.closed_trades = []
+        
         # Capture opening state
         try:
-            account = trade_client.get_account()
-            self.opening_equity = float(account.equity)
+            acc_values = ib.accountValues()
+            for v in acc_values:
+                if v.tag == 'NetLiquidation':
+                    self.opening_equity = float(v.value)
+                    break
             
-            # Capture opening positions
-            positions = trade_client.get_all_positions()
-            for pos in positions:
+            positions = ib.positions()
+            for p in positions:
                 self.opening_positions.append({
-                    'symbol': pos.symbol,
-                    'qty': float(pos.qty),
-                    'side': pos.side.value,
-                    'entry_price': float(pos.avg_entry_price),
-                    'market_value': float(pos.market_value),
-                    'unrealized_pl': float(pos.unrealized_pl)
+                    'symbol': p.contract.localSymbol,
+                    'qty': float(p.position),
+                    'side': 'long' if p.position > 0 else 'short',
+                    'entry_price': float(p.avgCost),
+                    'market_value': float(p.position * p.avgCost), # Rough
+                    'unrealized_pl': 0.0 # Requires ticker
                 })
         except Exception as e:
             print(f"⚠️ Could not capture opening state: {e}")
@@ -999,20 +878,23 @@ class TradingSession:
         closing_equity = 0.0
         closing_positions = []
         try:
-            account = trade_client.get_account()
-            closing_equity = float(account.equity)
+            acc_values = ib.accountValues()
+            for v in acc_values:
+                if v.tag == 'NetLiquidation':
+                    closing_equity = float(v.value)
+                    break
             
-            positions = trade_client.get_all_positions()
-            for pos in positions:
+            positions = ib.positions()
+            for p in positions:
                 closing_positions.append({
-                    'symbol': pos.symbol,
-                    'qty': float(pos.qty),
-                    'side': pos.side.value,
-                    'entry_price': float(pos.avg_entry_price),
-                    'current_price': float(pos.current_price),
-                    'market_value': float(pos.market_value),
-                    'unrealized_pl': float(pos.unrealized_pl),
-                    'unrealized_plpc': float(pos.unrealized_plpc)
+                    'symbol': p.contract.localSymbol,
+                    'qty': float(p.position),
+                    'side': 'long' if p.position > 0 else 'short',
+                    'entry_price': float(p.avgCost),
+                    'current_price': 0.0, # Requires ticker
+                    'market_value': float(p.position * p.avgCost),
+                    'unrealized_pl': 0.0,
+                    'unrealized_plpc': 0.0
                 })
         except Exception as e:
             print(f"⚠️ Could not fetch closing state: {e}")
@@ -1124,17 +1006,15 @@ class TradingSession:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-def interruptible_sleep(seconds, session):
+async def interruptible_sleep(seconds, session):
     """Sleeps for the specified time, but returns early if session should stop."""
     end_time = time.time() + seconds
     while time.time() < end_time and session.should_continue():
         # Sleep in small increments to stay responsive
         remaining = end_time - time.time()
-        time.sleep(min(1.0, remaining))
+        await asyncio.sleep(min(1.0, remaining))
 
-# ================= MAIN LOOP =================
-
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
     parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
@@ -1151,70 +1031,47 @@ if __name__ == "__main__":
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
     
-    # Validation for budgets
+    # Validation
     if config.ENABLE_OPTIONS and args.stock_budget is not None:
-        print("❌ Error: --stock-budget is only valid in Stock Mode. Use --option-budget for Options Mode.")
-        sys.exit(1)
-    if not config.ENABLE_OPTIONS and args.option_budget is not None:
-        print("❌ Error: --option-budget is only valid in Options Mode. Use --stock-budget for Stock Mode.")
+        print("❌ Error: --stock-budget is only valid in Stock Mode.")
         sys.exit(1)
     
-    # Handle daily trade cap
-    daily_cap = args.cap if args.cap is not None else 5  # Default to 5
+    daily_cap = args.cap if args.cap is not None else 5
     
-    if daily_cap == 0:
-        print("⚠️  WARNING: Daily trade cap is set to 0. No trades will be executed.")
-        response = input("Do you want to continue? (yes/no): ")
-        if response.lower() not in ['yes', 'y']:
-            print("Exiting...")
-            sys.exit(0)
-    
+    # Connect to IBKR
+    connected = await ibkr_mgr.connect()
+    if not connected:
+        print("❌ Failed to connect to IBKR. Exiting.")
+        return
+
     # Initialize session
     session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
-    
-    # Setup signal handlers for graceful shutdown
     session.setup_signal_handlers()
     
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
-    if daily_cap == -1:
-        print(f"Daily Trade Cap: Unlimited")
-    elif daily_cap == 0:
-        print(f"Daily Trade Cap: 0 (No trades allowed)")
-    else:
-        print(f"Daily Trade Cap: {daily_cap} trades per day")
-    if args.session_duration:
-        print(f"Session Duration: {args.session_duration} hours")
-    if args.max_trades:
-        print(f"Max Trades: {args.max_trades}")
     
-    from zoneinfo import ZoneInfo
-    ET = ZoneInfo("US/Eastern")
-
     try:
         while session.should_continue():
             try:
                 # 0. Maintenance Tasks
-                manage_option_expiry()
-                manage_trade_updates() # <--- NEW Call
+                await manage_option_expiry()
+                await manage_trade_updates()
                 
-                # 1. Check if market is open
-                clock = trade_client.get_clock()
-                if not clock.is_open:
-                    next_open_et = clock.next_open.astimezone(ET)
-                    print(f"Market is CLOSED. Next open: {next_open_et}. Waiting 15 minutes...")
-                    interruptible_sleep(900, session) # Wait 15 minutes
+                # 1. Market Hours Filter (Simple check)
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+                if now_et.weekday() >= 5:
+                    print("Market is CLOSED (Weekend). Waiting 1 hour...")
+                    await interruptible_sleep(3600, session)
                     continue
 
                 # 2. Market is open, look for signals
-                timestamp_et = clock.timestamp.astimezone(ET)
-                print(f"Analyzing {target_symbol} at {timestamp_et}...")
-                sig = generate_signal(target_symbol)
+                print(f"Analyzing {target_symbol} at {now_et}...")
+                sig = await generate_signal(target_symbol)
                 
                 if sig:
                     print(f"🚀 Signal detected: {sig.upper()}!")
-                    # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
-                    place_trade(
+                    await place_trade(
                         sig, 
                         target_symbol, 
                         use_daily_cap=use_cap, 
@@ -1223,21 +1080,20 @@ if __name__ == "__main__":
                         option_budget_override=args.option_budget
                     )
                     session.record_trade()
-                    # After a trade, sleep for 5 minutes to avoid rapid double-entry
                     print("Trade placed. Cooling down for 5 minutes...")
-                    interruptible_sleep(300, session)
+                    await interruptible_sleep(300, session)
                 else:
-                    # No signal, wait 1 minute before checking again
-                    interruptible_sleep(60, session)
+                    await interruptible_sleep(60, session)
 
             except Exception as e:
                 print(f"An error occurred in the main loop: {e}")
-                print("Restarting loop in 60 seconds...")
-                interruptible_sleep(60, session)
+                await interruptible_sleep(60, session)
     except KeyboardInterrupt:
-        # If signal handler didn't catch it for some reason
         session.request_stop()
-    
-    # Session ended
-    print("\n")
-    print(session.get_summary())
+    finally:
+        ibkr_mgr.disconnect()
+        print("\n")
+        print(session.get_summary())
+
+if __name__ == "__main__":
+    asyncio.run(main())

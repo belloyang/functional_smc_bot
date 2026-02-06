@@ -1,3 +1,4 @@
+ib_insync
 alpaca-py
 pandas>=2.0.0
 numpy>=2.2.6
