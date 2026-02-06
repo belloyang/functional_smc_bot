@@ -242,7 +242,7 @@ def generate_signal(symbol=None):
 
 from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
 
-def calculate_smart_quantity(price, stop_loss_price):
+def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None):
     """
     Calculates position size based on:
     1. Risk Amount (1% of Equity)
@@ -268,12 +268,33 @@ def calculate_smart_quantity(price, stop_loss_price):
     # 1. Risk-Based Qty
     qty_risk = risk_amount / stop_distance
     
-    # 2. Buying Power Cap
+    # 2. Ticker-Based Cap (Multi-Instance Safety)
+    if budget_override is not None:
+        max_ticker_pct = budget_override
+    else:
+        max_ticker_pct = getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
+        
+    max_ticker_amt = equity * max_ticker_pct
+    
+    # Calculate current exposure for this ticker (Stock Only)
+    current_exposure = 0.0
+    try:
+        positions = trade_client.get_all_positions()
+        for p in positions:
+            if p.symbol == symbol and p.asset_class.value == 'us_equity':
+                current_exposure += abs(float(p.market_value))
+    except Exception as e:
+        print(f"Error calculating exposure for {symbol}: {e}")
+        
+    remaining_ticker_budget = max(0, max_ticker_amt - current_exposure)
+    qty_ticker = remaining_ticker_budget / price
+    
+    # 3. Buying Power Cap
     max_cost = buying_power * 0.95
     qty_bp = max_cost / price
     
     # Final
-    qty = int(min(qty_risk, qty_bp))
+    qty = int(min(qty_risk, qty_ticker, qty_bp))
     
     # Log
     print(f"DEBUG: Equity: ${equity:.2f} | Risk($): ${risk_amount:.2f} | Entry: {price} | SL: {stop_loss_price} | Dist: {stop_distance:.2f}")
@@ -356,7 +377,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
+def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -519,24 +540,46 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
                 # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
-                budget_pct = getattr(config, 'OPTIONS_BUDGET_PCT', 0.10)
+                if option_budget_override is not None:
+                    budget_pct = option_budget_override
+                else:
+                    budget_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
                 total_budget = equity * budget_pct
                 
-                # Fetch all current positions to sum existing option exposure
+                # Fetch all current positions to sum exposure
                 all_positions = trade_client.get_all_positions()
+                
+                # 1. Global Option Exposure Check
                 existing_option_exposure = 0.0
                 for p in all_positions:
                     if p.asset_class == 'us_option':
                         existing_option_exposure += abs(float(p.market_value))
                 
-                remaining_budget = total_budget - existing_option_exposure
+                global_option_remaining = total_budget - existing_option_exposure
+                
+                # 2. Ticker-Specific Option Exposure Check
+                if option_budget_override is not None:
+                     max_ticker_option_pct = option_budget_override
+                else:
+                     max_ticker_option_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+                
+                max_ticker_option_amt = equity * max_ticker_option_pct
+                ticker_option_exposure = 0.0
+                for p in all_positions:
+                    if p.symbol.startswith(symbol) and p.asset_class.value == 'us_option':
+                        ticker_option_exposure += abs(float(p.market_value))
+                
+                ticker_remaining = max(0, max_ticker_option_amt - ticker_option_exposure)
+                
+                # 3. Final Budget for this trade
+                available_budget = min(global_option_remaining, ticker_remaining)
                 cost_per_contract = entry_est * 100
                 
-                if remaining_budget < cost_per_contract:
-                    print(f"⚠️ WARNING: Global Option Budget (${total_budget:.2f}) with Current Exposure (${existing_option_exposure:.2f}) leaves only ${remaining_budget:.2f}. Insufficient for 1 contract (${cost_per_contract:.2f}). Skipping.")
+                if available_budget < cost_per_contract:
+                    print(f"⚠️ WARNING: Insufficient Budget for {symbol} option. Global Remain: ${global_option_remaining:.2f}, Ticker Remain: ${ticker_remaining:.2f}. Need ${cost_per_contract:.2f}. Skipping.")
                     return
                 
-                qty = int(remaining_budget // cost_per_contract)
+                qty = int(available_budget // cost_per_contract)
                 if qty > 5:
                     print(f"DEBUG: Capping contracts from {qty} to 5.")
                     qty = 5
@@ -545,7 +588,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
                     print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
                     return
 
-                print(f"Global Option Sizing: Total Equity ${equity:.2f} | Remaining Budget ${remaining_budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
+                print(f"Sizing: Total Equity ${equity:.2f} | Available Budget ${available_budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
                 
                 sl_req = StopLossRequest(stop_price=sl_price)
                 tp_req = TakeProfitRequest(limit_price=tp_price)
@@ -592,7 +635,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None):
             tp_price = price + (risk_dist * 2.5)
             
             # 1.3 Calculate Quantity
-            qty = calculate_smart_quantity(price, sl_price)
+            qty = calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
             if qty <= 0:
                 print("Calculated Quantity is 0, skipping trade.")
                 return
@@ -1098,6 +1141,8 @@ if __name__ == "__main__":
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
     parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
+    parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
     
     args = parser.parse_args()
     target_symbol = args.symbol
@@ -1105,6 +1150,14 @@ if __name__ == "__main__":
     if args.options:
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
+    
+    # Validation for budgets
+    if config.ENABLE_OPTIONS and args.stock_budget is not None:
+        print("❌ Error: --stock-budget is only valid in Stock Mode. Use --option-budget for Options Mode.")
+        sys.exit(1)
+    if not config.ENABLE_OPTIONS and args.option_budget is not None:
+        print("❌ Error: --option-budget is only valid in Options Mode. Use --stock-budget for Stock Mode.")
+        sys.exit(1)
     
     # Handle daily trade cap
     daily_cap = args.cap if args.cap is not None else 5  # Default to 5
@@ -1161,7 +1214,14 @@ if __name__ == "__main__":
                     print(f"🚀 Signal detected: {sig.upper()}!")
                     # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
-                    place_trade(sig, target_symbol, use_daily_cap=use_cap, daily_cap_value=daily_cap if use_cap else None)
+                    place_trade(
+                        sig, 
+                        target_symbol, 
+                        use_daily_cap=use_cap, 
+                        daily_cap_value=daily_cap if use_cap else None,
+                        stock_budget_override=args.stock_budget,
+                        option_budget_override=args.option_budget
+                    )
                     session.record_trade()
                     # After a trade, sleep for 5 minutes to avoid rapid double-entry
                     print("Trade placed. Cooling down for 5 minutes...")
