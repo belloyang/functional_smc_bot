@@ -1091,7 +1091,7 @@ async def main():
                 sig = await generate_signal(target_symbol)
                 
                 if sig:
-                    print(f"🚀 Signal detected: {sig.upper()}!")
+                    print(f"🚀 Signal detected: {sig.upper()}!({target_symbol})")
                     use_cap = (daily_cap != -1)
                     await place_trade(
                         sig, 
