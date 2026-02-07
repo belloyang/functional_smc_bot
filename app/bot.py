@@ -1193,17 +1193,17 @@ if __name__ == "__main__":
     try:
         while session.should_continue():
             try:
-                # 0. Maintenance Tasks
-                manage_option_expiry()
-                manage_trade_updates() # <--- NEW Call
-                
-                # 1. Check if market is open
+                # 1. Check if market is open FIRST
                 clock = trade_client.get_clock()
                 if not clock.is_open:
                     next_open_et = clock.next_open.astimezone(ET)
-                    print(f"Market is CLOSED. Next open: {next_open_et}. Waiting 15 minutes...")
+                    print(f"🕒 Market is CLOSED. Next open: {next_open_et.strftime('%Y-%m-%d %H:%M:%S')}. Waiting 15 minutes...")
                     interruptible_sleep(900, session) # Wait 15 minutes
                     continue
+
+                # 2. Maintenance Tasks (Only run during market hours)
+                manage_option_expiry()
+                manage_trade_updates()
 
                 # 2. Market is open, look for signals
                 timestamp_et = clock.timestamp.astimezone(ET)
