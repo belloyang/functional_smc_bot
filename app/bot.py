@@ -765,6 +765,20 @@ async def manage_trade_updates():
 
                 # Trailing logic
                 updated = False
+                
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%
+                if pl_pct >= 0.30 and virtual_stop < 0.20:
+                    virtual_stop = 0.20
+                    updated = True
+                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +20%.")
+                elif pl_pct >= 0.20 and virtual_stop < 0.10:
+                    virtual_stop = 0.10
+                    updated = True
+                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +10%.")
+                elif pl_pct >= 0.10 and virtual_stop < 0.0:
+                    virtual_stop = 0.0
+                    updated = True
+                    print(f"🛡️ OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to BE (0%).")
                 if pl_pct >= 0.40 and virtual_stop < 0.20:
                     virtual_stop = 0.20; updated = True
                 elif pl_pct >= 0.30 and virtual_stop < 0.10:
@@ -868,6 +882,8 @@ class TradingSession:
         self.opening_equity = None
         self.opening_positions = []
         self.closed_trades = []  # List of dicts with {symbol, pnl, win}
+        self.day_starting_equity = None
+        self.daily_loss_limit_hit = False
         
         # Capture opening state
         try:
@@ -1117,6 +1133,42 @@ async def main():
                     print(f"🕒 {status_msg}. Waiting 15 minutes...")
                     await interruptible_sleep(900, session)
                     continue
+
+                # 2. Daily Loss Limit Check (3%)
+                account = trade_client.get_account()
+                current_equity = float(account.equity)
+                current_date = timestamp_et.date()
+                
+                # Reset daily starting equity at start of new trading day
+                if session.day_starting_equity is None or (hasattr(session, 'last_trading_date') and session.last_trading_date != current_date):
+                    session.day_starting_equity = current_equity
+                    session.daily_loss_limit_hit = False
+                    session.last_trading_date = current_date
+                    print(f"🔄 New trading day. Starting equity: ${session.day_starting_equity:,.2f}")
+                
+                # Check daily loss limit
+                daily_pnl_pct = (current_equity - session.day_starting_equity) / session.day_starting_equity if session.day_starting_equity > 0 else 0
+                if daily_pnl_pct <= -0.03 and not session.daily_loss_limit_hit:
+                    print(f"🛑 DAILY LOSS LIMIT HIT (-3%). Current: ${current_equity:,.2f} | Start: ${session.day_starting_equity:,.2f} | Loss: {daily_pnl_pct*100:.2f}%")
+                    print("🛑 Closing all positions and stopping trading for today.")
+                    # Close all positions
+                    try:
+                        positions = trade_client.get_all_positions()
+                        for pos in positions:
+                            trade_client.close_position(pos.symbol)
+                            print(f"Closed {pos.symbol}")
+                    except Exception as e:
+                        print(f"⚠️ Error closing positions: {e}")
+                    session.daily_loss_limit_hit = True
+                
+                if session.daily_loss_limit_hit:
+                    print("⏸️ Daily loss limit active. Waiting until next trading day...")
+                    interruptible_sleep(900, session)  # Wait 15 minutes
+                    continue
+
+                # 3. Maintenance Tasks (Only run during market hours)
+                manage_option_expiry()
+                manage_trade_updates()
 
                 # 2. Market is open, look for signals
                 print(f"Analyzing {target_symbol} at {now_et}...")
