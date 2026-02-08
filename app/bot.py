@@ -302,82 +302,10 @@ def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=Non
     
     return max(0, qty)
 
-# ================= HELPERS =================
-
-from alpaca.trading.requests import GetOptionContractsRequest
-from alpaca.trading.enums import AssetStatus, ContractType
-
-def get_best_option_contract(symbol, signal_type, known_price=None):
+def place_trade(signal, symbol, trade_client, historical_client, mode="day", sl_price=None, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     """
-    Finds the best option contract for the given signal.
+    Executes a trade based on the signal and mode.
     """
-    try:
-        if known_price:
-             current_price = known_price
-        else:
-            current_price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
-            if current_price_df.empty:
-                print("Could not fetch current price for options.")
-                return None
-            current_price = current_price_df['close'].iloc[-1]
-            
-        now = datetime.now()
-        start_date = now + timedelta(days=3)
-        end_date = now + timedelta(days=14)
-        
-        contract_type = ContractType.CALL if signal_type == "buy" else ContractType.PUT
-        
-        req = GetOptionContractsRequest(
-            underlying_symbols=[symbol],
-            status=AssetStatus.ACTIVE,
-            expiration_date_gte=start_date.date(),
-            expiration_date_lte=end_date.date(),
-            type=contract_type,
-            limit=100 
-        )
-        
-        print(f"DEBUG: Searching options for {symbol} | Type: {contract_type} | Range: {start_date.date()} to {end_date.date()}")
-        contracts = trade_client.get_option_contracts(req).option_contracts
-        
-        if not contracts:
-            print(f"No option contracts found for {symbol}")
-            return None
-            
-        contracts.sort(key=lambda x: x.expiration_date)
-        nearest_expiry = contracts[0].expiration_date
-        expiry_contracts = [c for c in contracts if c.expiration_date == nearest_expiry]
-        expiry_contracts.sort(key=lambda c: abs(float(c.strike_price) - current_price))
-        
-        return expiry_contracts[0]
-
-    except Exception as e:
-        print(f"Error getting option contract: {e}")
-        return None
-
-def get_current_position(symbol):
-    """
-    Fetches the current position for the given symbol.
-    Returns the Position object if found, else None.
-    """
-    try:
-        return trade_client.get_open_position(symbol)
-    except Exception:
-        return None
-
-def cancel_all_orders_for_symbol(symbol):
-    """
-    Safely cancels all open orders for a specific symbol.
-    """
-    try:
-        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbol=symbol)
-        orders = trade_client.get_orders(req)
-        for o in orders:
-            trade_client.cancel_order_by_id(o.id)
-            print(f"Cancelled order {o.id} for {symbol}")
-    except Exception as e:
-        print(f"⚠️ Error cancelling orders for {symbol}: {e}")
-
-def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -502,8 +430,17 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
             print(f"Existing {signal.upper()} option bias detected for {symbol}. Skipping redundant entry.")
             return
 
-        print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
-        contract = get_best_option_contract(symbol, signal)
+        if mode == "swing":
+            # Swing Mode: 3 weeks to 2 months (21-60 days)
+            min_dte = 21
+            max_dte = 60
+        else:
+            # Day Mode: Weekly (3-14 days)
+            min_dte = 3
+            max_dte = 14
+            
+        print(f"Options Trading Enabled. Searching for contract for {signal.upper()} (DTE: {min_dte}-{max_dte})...")
+        contract = get_best_option_contract(symbol, signal, min_days=min_dte, max_days=max_dte)
         
         if contract:
             trade_symbol = contract.symbol
@@ -619,16 +556,19 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
     if signal == "buy":
         if qty_held == 0:
             # 1.1 Determine Stop Loss (Recent Swing Low)
-            # Look back 50 bars for a swing low
-            swing_low = get_last_swing_low(price_df, window=5)
-            
-            if swing_low and swing_low < price:
-                sl_price = swing_low
-                print(f"Structure Stop: Swing Low at {sl_price}")
+            if sl_price is None: # If SL not provided by strategy
+                # Look back 50 bars for a swing low
+                swing_low = get_last_swing_low(price_df, window=5)
+                
+                if swing_low and swing_low < price:
+                    sl_price = swing_low
+                    print(f"Structure Stop: Swing Low at {sl_price}")
+                else:
+                    # Fallback: 0.5% below price
+                    sl_price = price * 0.995
+                    print(f"Fallback Stop: 0.5% at {sl_price}")
             else:
-                # Fallback: 0.5% below price
-                sl_price = price * 0.995
-                print(f"Fallback Stop: 0.5% at {sl_price}")
+                print(f"Strategy provided Stop: {sl_price}")
                 
             # 1.2 Determine Take Profit (1:2.5 Risk Reward)
             risk_dist = price - sl_price
@@ -683,7 +623,61 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
 
     elif signal == "sell":
         if qty_held == 0:
-            print("SELL Signal detected but no position held. Skipping Short Entry (Long-Only Mode).")
+            if config.ENABLE_OPTIONS:
+                # 3. OPTIONS: Buy Put (Long Put Strategy)
+                # Calculate Budget
+                if option_budget_override:
+                     budget_pct = option_budget_override
+                else:
+                     budget_pct = config.OPTION_BUDGET_PCT
+
+                available_cash = float(trade_client.get_account().cash)
+                # Limit to budget_pct of *initial* or *current*? Let's use current cash for simplicity or config rule
+                # Better: Use Portfolio Value * pct? Sticking to cash * pct for safety
+                trade_amt = available_cash * budget_pct
+                
+                print(f"Selling Signal -> Buying PUT Options with ${trade_amt:.2f} budget...")
+                
+                # Check min equity
+                if available_cash < 1000: # Arbitrary min
+                    print("❌ Insufficient cash for options.")
+                    return
+
+                # Find Contract
+                # Day Mode: 3-14 DTE (as per update), Swing: 21-60 DTE. 
+                # Use passed 'mode' to decide DTE. 
+                min_dte = 21 if mode == "swing" else 3
+                max_dte = 60 if mode == "swing" else 14
+                
+                contract = get_best_option_contract(symbol, "sell", known_price=None, min_days=min_dte, max_days=max_dte)
+                
+                if contract:
+                     # Calculate Qty
+                     price = float(contract.ask_price) if contract.ask_price else float(contract.close_price)
+                     if price <= 0:
+                         print("❌ Option price is zero/invalid.")
+                         return
+                         
+                     qty = int(trade_amt // (price * 100))
+                     if qty < 1:
+                         print(f"❌ Budget ${trade_amt:.2f} too low for contract price ${price:.2f}")
+                         return
+                     if qty > 5: qty = 5 # Hard cap
+                     
+                     print(f"✅ Submitting Market BUY for {qty}x {contract.symbol} (Ask: ${price})")
+                     
+                     req = MarketOrderRequest(
+                        symbol=contract.symbol,
+                        qty=qty,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY
+                     )
+                     trade_client.submit_order(req)
+                else:
+                    print("❌ No suitable PUT contract found.")
+
+            else:
+                print("SELL Signal detected but no position held. Skipping Short Entry (Stock Long-Only Mode).")
             return
             
         elif side_held == PositionSide.LONG: # We are Long
@@ -1169,6 +1163,7 @@ if __name__ == "__main__":
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
+    last_trade_time = None
 
     try:
         while session.should_continue():
@@ -1190,22 +1185,42 @@ if __name__ == "__main__":
                 print(f"Analyzing {target_symbol} at {timestamp_et} (Mode: {mode.upper()})...")
                 
                 sig = None
+                sl_from_strategy = None
                 if mode == "swing":
                     # Lazy Import to avoid circular dependencies if any
                     from .swing_strategy import get_swing_signal
-                    # Pass the data_client instance for data fetching
-                    sig = get_swing_signal(target_symbol, data_client)
+                    # Swing Mode Signal
+                    swing_result = get_swing_signal(target_symbol, data_client)
+                    if swing_result:
+                        sig = swing_result['signal']
+                        sl_from_strategy = swing_result.get('sl')
+                        print(f"[{target_symbol}] Swing Signal: {sig.upper()} (SL: {sl_from_strategy})")
+                    else:
+                        pass # No signal
                 else:
                     # Default Day Trading
                     sig = generate_signal(target_symbol)
                 
                 if sig:
+                    # COOLDOWN CHECK
+                    if last_trade_time:
+                         elapsed = (timestamp_et - last_trade_time).total_seconds()
+                         if elapsed < 300: # 5 minutes
+                             print(f"⏳ Cooldown Active (Elapsed: {elapsed/60:.1f}m). Skipping signal.")
+                             sig = None
+                    
+                if sig:
                     print(f"🚀 Signal detected: {sig.upper()}!")
+                    last_trade_time = timestamp_et # Update last trade time
                     # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
                     place_trade(
                         sig, 
                         target_symbol, 
+                        trade_client, 
+                        data_client, # historical_client is data_client
+                        mode=mode,
+                        sl_price=sl_from_strategy,
                         use_daily_cap=use_cap, 
                         daily_cap_value=daily_cap if use_cap else None,
                         stock_budget_override=args.stock_budget,

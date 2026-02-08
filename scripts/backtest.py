@@ -19,6 +19,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
+from app.swing_strategy import analyze_swing_signal
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -41,42 +42,69 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20, mode="day"):
     if symbol is None:
         symbol = config.SYMBOL
         
-    print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
+    print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type}, Mode: {mode})...")
     
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=days_back + 20) # Extra data for vol calc
+    start_time = end_time - timedelta(days=days_back + 100 if mode == "swing" else days_back + 20) # Extra data for vol calc
     
-    # HTF Data (15 Min)
-    print("Fetching HTF data...")
-    htf_req = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-        start=start_time,
-        end=end_time,
-        feed="iex"
-    )
-    htf_data = client.get_stock_bars(htf_req).df
+    if mode == "swing":
+        # HTF Data (Daily)
+        print("Fetching HTF data (Daily)...")
+        htf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(1, TimeFrameUnit.Day),
+            start=end_time - timedelta(days=365), # Need enough for structure
+            end=end_time,
+            limit=10000,
+            feed="iex"
+        )
+        htf_data = client.get_stock_bars(htf_req).df
+        
+        # LTF Data (Hourly)
+        print("Fetching LTF data (Hourly)...")
+        ltf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(1, TimeFrameUnit.Hour),
+            start=start_time,
+            end=end_time,
+            limit=10000,
+            feed="iex"
+        )
+        ltf_data = client.get_stock_bars(ltf_req).df
+        
+    else:
+        # HTF Data (15 Min)
+        print("Fetching HTF data (15 Min)...")
+        htf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            start=start_time,
+            end=end_time,
+            feed="iex"
+        )
+        htf_data = client.get_stock_bars(htf_req).df
+        
+        # LTF Data (1 Min)
+        print("Fetching LTF data (1 Min)...")
+        ltf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+            start=start_time,
+            end=end_time,
+            feed="iex"
+        )
+        ltf_data = client.get_stock_bars(ltf_req).df
+
     if htf_data.empty:
         print("No HTF data found.")
         return
-
-    # LTF Data (1 Min)
-    print("Fetching LTF data...")
-    ltf_req = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-        start=start_time,
-        end=end_time,
-        feed="iex"
-    )
-    ltf_data = client.get_stock_bars(ltf_req).df
     if ltf_data.empty:
         print("No LTF data found.")
         return
@@ -103,8 +131,15 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # Rolling standard deviation of returns * sqrt(bars_per_year)
     # 252 trading days * 26 (15-min bars) = 6552 bars/year
     # Let's use a simpler rolling Vol estimation:
-    # 50-period rolling std dev of log returns * sqrt(6552)
-    htf_data['volatility'] = htf_data['log_ret'].rolling(window=50).std() * math.sqrt(252 * 26)
+    # Calculate Historical Volatility
+    htf_data['log_ret'] = np.log(htf_data['close'] / htf_data['close'].shift(1))
+    
+    if mode == "swing":
+        # Daily Data: Annualize with sqrt(252)
+        htf_data['volatility'] = htf_data['log_ret'].rolling(window=20).std() * math.sqrt(252)
+    else:
+        # 15-Min Data: Annualize with sqrt(252 * 26)
+        htf_data['volatility'] = htf_data['log_ret'].rolling(window=50).std() * math.sqrt(252 * 26)
     htf_data['volatility'] = htf_data['volatility'].fillna(0.20) # Default 20%
 
     print(f"Data loaded. HTF: {len(htf_data)} bars, LTF: {len(ltf_data)} bars.")
@@ -160,11 +195,31 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             continue
             
         current_vol = htf_slice.iloc[-1]['volatility']
-        htf_slice = htf_slice.iloc[-200:] # Limit to last 200 HTF for speed
-        ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
         
-        # Run Strategy
-        signal = get_strategy_signal(htf_slice, ltf_slice)
+        # --- Strategy Logic ---
+        signal = None
+        sl_custom = None
+        
+        if mode == "swing":
+            # For swing, we need daily (HTF) and hourly (LTF) data.
+            # HTF should be completed bars (timestamp < current_time_utc)
+            pass_htf = htf_data[htf_data.index < current_time_utc]
+            pass_ltf = ltf_data.iloc[:i+1] # Slice up to current
+            
+            # Check minimum data requirements
+            if len(pass_htf) > 50 and len(pass_ltf) > 20:
+                 res = analyze_swing_signal(pass_htf.reset_index(), pass_ltf.reset_index(), symbol)
+                 if res:
+                     signal = res['signal']
+                     sl_custom = res.get('sl')
+        else: # mode == "day"
+            # For day trading, we use 15min (HTF) and 1min (LTF) data.
+            htf_slice_day = htf_data[htf_data.index <= current_time_utc]
+            ltf_slice_day = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF for speed
+            
+            # Check minimum data requirements
+            if len(htf_slice_day) > 50 and len(ltf_slice_day) > 20:
+                signal = get_strategy_signal(htf_slice_day, ltf_slice_day)
         
         price = current_bar['close']
         
@@ -173,46 +228,78 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if position != 0 and active_trade:
             if trade_type == "stock":
                 # 1. Stop Loss Hit
-                if price <= active_trade['stop_loss']:
+                stop_hit = False
+                if position > 0: # Long
+                    if price <= active_trade['stop_loss']: stop_hit = True
+                elif position < 0: # Short
+                    if price >= active_trade['stop_loss']: stop_hit = True
+                    
+                if stop_hit:
                     exit_price = active_trade['stop_loss']
-                    proceeds = position * exit_price
-                    balance += proceeds
-                    pnl = (exit_price - entry_price) * position
+                    # PnL: Long = (Exit - Entry), Short = (Entry - Exit)
+                    pnl = (exit_price - entry_price) * position if position > 0 else (entry_price - exit_price) * abs(position)
+                    
                     trades.append({'time': current_time_et, 'type': 'stop_loss_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    balance += (entry_price * abs(position)) + pnl # Return margin + pnl
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
-                if price >= active_trade['take_profit']:
+                tp_hit = False
+                if position > 0: # Long
+                    if price >= active_trade['take_profit']: tp_hit = True
+                elif position < 0: # Short
+                    if price <= active_trade['take_profit']: tp_hit = True
+                    
+                if tp_hit:
                     exit_price = active_trade['take_profit']
-                    proceeds = position * exit_price
-                    balance += proceeds
-                    pnl = (exit_price - entry_price) * position
+                    pnl = (exit_price - entry_price) * position if position > 0 else (entry_price - exit_price) * abs(position)
+                    
                     trades.append({'time': current_time_et, 'type': 'take_profit_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    balance += (entry_price * abs(position)) + pnl
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
                     continue
 
                 # 3. Active Management
-                pl_pct = (price - entry_price) / entry_price
-                # --- STEPPED TRAILING STOP LOGIC ---
-                STEP_SIZE = 0.10
-                if pl_pct >= STEP_SIZE:
-                    milestone = int(pl_pct * 10) / 10.0
-                    lock_pct = milestone - 0.10
-                    target_stop = entry_price * (1 + lock_pct)
-                    
-                    if active_trade['stop_loss'] < target_stop:
-                        active_trade['stop_loss'] = target_stop
-                        if lock_pct <= 0.001:
-                             print(f"[{current_time_et}] 🛡️ BREAK EVEN: up {pl_pct*100:.1f}%. SL -> Entry ({target_stop:.2f})")
-                        else:
-                             print(f"[{current_time_et}] 💰 PROFIT LOCK: up {pl_pct*100:.1f}%. SL -> {target_stop:.2f} (+{lock_pct*100:.0f}%)")
+                if position > 0: # Long
+                    pl_pct = (price - entry_price) / entry_price
+                    # --- STEPPED TRAILING STOP LOGIC (LONG) ---
+                    STEP_SIZE = 0.10
+                    if pl_pct >= STEP_SIZE:
+                        milestone = int(pl_pct * 10) / 10.0
+                        lock_pct = milestone - 0.10
+                        target_stop = entry_price * (1 + lock_pct)
+                        
+                        if active_trade['stop_loss'] < target_stop:
+                            active_trade['stop_loss'] = target_stop
+                            if lock_pct <= 0.001:
+                                 print(f"[{current_time_et}] 🛡️ BREAK EVEN (LONG): up {pl_pct*100:.1f}%. SL -> {target_stop:.2f}")
+                            else:
+                                 print(f"[{current_time_et}] 💰 PROFIT LOCK (LONG): up {pl_pct*100:.1f}%. SL -> {target_stop:.2f}")
+                                 
+                elif position < 0: # Short
+                    pl_pct = (entry_price - price) / entry_price
+                    # --- STEPPED TRAILING STOP LOGIC (SHORT) ---
+                    STEP_SIZE = 0.10
+                    if pl_pct >= STEP_SIZE:
+                        milestone = int(pl_pct * 10) / 10.0
+                        lock_pct = milestone - 0.10
+                        # For short, Lock 10% profit means SL is at Entry * 0.90
+                        target_stop = entry_price * (1 - lock_pct)
+                        
+                        # Move SL DOWN
+                        if active_trade['stop_loss'] > target_stop:
+                            active_trade['stop_loss'] = target_stop
+                            if lock_pct <= 0.001:
+                                 print(f"[{current_time_et}] 🛡️ BREAK EVEN (SHORT): up {pl_pct*100:.1f}%. SL -> {target_stop:.2f}")
+                            else:
+                                 print(f"[{current_time_et}] 💰 PROFIT LOCK (SHORT): up {pl_pct*100:.1f}%. SL -> {target_stop:.2f}")
 
             elif trade_type == "options":
                 time_held = current_time_utc - active_trade['entry_time']
@@ -287,6 +374,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             daily_trade_count = 0
             last_trade_date = current_date
 
+        # --- COOLDOWN CHECK ---
+        if last_exit_time:
+             # Cooldown 5 mins (User Request)
+             elapsed = (current_time_utc - last_exit_time).total_seconds()
+             if elapsed < 300:
+                 # print(f"[{current_time_et}] ⏳ Cooldown Active. Skipping.")
+                 continue
+
         # --- ENTRY LOGIC ---
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
@@ -296,11 +391,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
-                    swing_low = get_last_swing_low(ltf_slice, window=5)
-                    if swing_low and swing_low < price:
-                        sl = swing_low
+                    if sl_custom:
+                        sl = sl_custom
                     else:
-                        sl = price * 0.995 # Fallback 0.5%
+                        swing_low = get_last_swing_low(ltf_slice_day if mode == "day" else pass_ltf, window=5) # Use appropriate LTF slice
+                        if swing_low and swing_low < price:
+                            sl = swing_low
+                        else:
+                            sl = price * 0.995 # Fallback 0.5%
                     
                     risk_dist = price - sl
                     tp = price + (risk_dist * 2.5)
@@ -335,7 +433,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                 elif trade_type == "options":
                     strike = round(price)
-                    days_to_expiry = 7
+                    # DTE Selection: Swing = 45 days (approx 3-8 weeks), Day = 7 days
+                    days_to_expiry = 45 if mode == "swing" else 7
                     T = days_to_expiry / 365.0
                     sigma = current_vol if current_vol > 0 else 0.2
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
@@ -393,10 +492,37 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             # Check daily cap if enabled
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             if position == 0 and in_window and trade_count_ok:
-                # Enter Short (Options only)
-                if trade_type == "options":
+                # Enter Short
+                if trade_type == "stock":
+                    if sl_custom:
+                        sl = sl_custom
+                    else:
+                        swing_high = get_last_swing_high(ltf_slice_day if mode == "day" else pass_ltf, window=5)
+                        if swing_high and swing_high > price:
+                            sl = swing_high
+                        else:
+                            sl = price * 1.005 # Fallback 0.5%
+                        
+                    risk = sl - price
+                    tp = price - (risk * 2.5) # 1:2.5 RR
+                    
+                    # Size
+                    budget = balance * stock_budget_pct
+                    qty = int(budget // price)
+                    
+                    if qty > 0:
+                        balance -= (qty * price) # Use cash to cover margin req (simplified)
+                        position = -qty # Negative for short
+                        entry_price = price
+                        active_trade = {'stop_loss': sl, 'take_profit': tp, 'type': 'stock_short'}
+                        daily_trade_count += 1
+                        trades.append({'time': current_time_et, 'type': 'sell_short', 'price': price, 'qty': qty, 'pnl': 0})
+                        print(f"[{current_time_et}] SELL SHORT @ {price:.2f} | Qty: {qty} | SL: {sl:.2f} | TP: {tp:.2f}")
+
+                elif trade_type == "options":
                     strike = round(price)
-                    days_to_expiry = 7
+                    # DTE Selection: Swing = 45 days (approx 3-8 weeks), Day = 7 days
+                    days_to_expiry = 45 if mode == "swing" else 7
                     sigma = current_vol if current_vol > 0 else 0.2
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
@@ -549,26 +675,20 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
-    parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%)")
-    parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%)")
+    parser.add_argument("--stock-budget", type=float, default=0.80, help="Stock budget allocation (0.0-1.0)")
+    parser.add_argument("--option-budget", type=float, default=0.20, help="Option budget allocation (0.0-1.0)")
+    parser.add_argument("--mode", type=str, default="day", choices=["day", "swing"], help="Backtest Mode: 'day' or 'swing'")
     
     args = parser.parse_args()
     
-    # Handle daily cap
-    if args.cap is not None:
-        if args.cap == -1:
-            use_daily_cap = False
-            daily_cap_value = 5  # Doesn't matter when cap is disabled
-        else:
-            use_daily_cap = True
-            daily_cap_value = args.cap
-    else:
-        use_daily_cap = True  # Default behavior
-        daily_cap_value = 5
-    
-    # Handle budgets
-    stock_budget = args.stock_budget if args.stock_budget is not None else getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
-    option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
-    
-    mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget)
+    run_backtest(
+        days_back=args.days, 
+        symbol=args.symbol, 
+        trade_type="options" if args.options else "stock", 
+        initial_balance=args.balance,
+        use_daily_cap=(args.cap != -1) if args.cap is not None else True,
+        daily_cap_value=args.cap if args.cap is not None and args.cap != -1 else 5,
+        stock_budget_pct=args.stock_budget,
+        option_budget_pct=args.option_budget,
+        mode=args.mode
+    )

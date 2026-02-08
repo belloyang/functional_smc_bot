@@ -213,13 +213,106 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+def analyze_swing_signal(d1_bars: pd.DataFrame, h1_bars: pd.DataFrame, symbol="Unknown"):
+    """
+    Pure Logic: Analyzes D1/H1 dataframes for Swing Setup.
+    Returns signal ('buy', 'sell', None).
+    """
+    try:
+        # 2. Analyze Structure (D1)
+        smc = SMCStructure()
+        bias_d1, swing_high, swing_low = smc.determine_bias(d1_bars)
+        
+        # print(f"[{symbol}] D1 Bias: {bias_d1.upper()}")
+        
+        if bias_d1 == "neutral":
+             return None
+             
+        # 3. Premium/Discount Check
+        if not swing_high or not swing_low:
+             return None
+             
+        current_price = d1_bars['close'].iloc[-1]
+        pd_zone = smc.check_premium_discount(current_price, swing_high, swing_low)
+        # print(f"[{symbol}] Zone: {pd_zone.upper()} (Range: {swing_low['price']} - {swing_high['price']})")
+        
+        # Bias-Zone Alignment Rule
+        if bias_d1 == "bullish" and pd_zone != "discount":
+            # print(f"[{symbol}] Skip: Bullish but not in Discount.")
+            return None
+        if bias_d1 == "bearish" and pd_zone != "premium":
+            # print(f"[{symbol}] Skip: Bearish but not in Premium.")
+            return None
+            
+        # 4. Liquidity & Entry Check (H1)
+        liq = SMCLiquidity()
+        
+        # Check for Sweep
+        has_sweep = liq.detect_liquidity_sweep(h1_bars, bias_d1, window=30)
+        # print(f"[{symbol}] Liquidity Sweep: {has_sweep}")
+        
+        if not has_sweep:
+            # Strict Rule: No Sweep = No Trade
+            return None
+            
+        # 5. Trend Filter (EMA 200)
+        # Calculate EMAs
+        d1_bars['ema200'] = ta.ema(d1_bars['close'], length=200)
+        h1_bars['ema200'] = ta.ema(h1_bars['close'], length=200)
+        h1_bars['atr'] = ta.atr(h1_bars['high'], h1_bars['low'], h1_bars['close'], length=14)
+        
+        current_close_d1 = d1_bars['close'].iloc[-1]
+        current_close_h1 = h1_bars['close'].iloc[-1]
+        d1_ema = d1_bars['ema200'].iloc[-1] if pd.notna(d1_bars['ema200'].iloc[-1]) else None
+        
+        # Global Trend Filter (D1)
+        if d1_ema:
+            if bias_d1 == "bullish" and current_close_d1 < d1_ema:
+                # print(f"[{symbol}] Filtered: Bullish Bias but below D1 200 EMA.")
+                return None
+            if bias_d1 == "bearish" and current_close_d1 > d1_ema:
+                # print(f"[{symbol}] Filtered: Bearish Bias but above D1 200 EMA.")
+                return None
+
+        # Check for OB presence nearby
+        ob = liq.find_order_blocks(h1_bars, bias_d1)
+        if ob:
+            ob_high = ob['high']
+            ob_low = ob['low']
+            # Entry Confirmation: Close must be past the OB to confirm rejection/bounce
+            # Bullish: We want price to have dipped into OB and then closed ABOVE it? 
+            # Actually, standard confirmation is just price reacting. 
+            # Let's enforce: Close > OB High (Bullish) or Close < OB Low (Bearish) - "Reclaimed"
+            
+            signal = None
+            sl_price = 0.0
+            
+            if bias_d1 == "bullish":
+                if current_close_h1 > ob_high: # Close above Bullish OB Higb = Confirmation
+                    signal = "buy"
+                    atr = h1_bars['atr'].iloc[-1]
+                    sl_price = swing_low['price'] - (1.5 * atr) if pd.notna(atr) else swing_low['price'] * 0.99
+            elif bias_d1 == "bearish":
+                if current_close_h1 < ob_low: # Close below Bearish OB Low = Confirmation
+                    signal = "sell"
+                    atr = h1_bars['atr'].iloc[-1]
+                    sl_price = swing_high['price'] + (1.5 * atr) if pd.notna(atr) else swing_high['price'] * 1.01
+
+            if signal:
+                print(f"[{symbol}] Valid OB Found & Confirmed: {ob['type']} | SL: {sl_price:.2f}")
+                return {'signal': signal, 'sl': sl_price}
+                
+        return None
+    except Exception as e:
+        print(f"Error in analyze_swing_signal: {e}")
+        return None
+
 def get_swing_signal(symbol, data_client: StockHistoricalDataClient):
     """
-    Orchestrator for Swing Trading Signal.
+    Orchestrator for Swing Trading Signal (Live Data).
     """
     try:
         # 1. Fetch Data (W1, D1, 4H - modeled here as D1 & 1H for data availability in standard plan)
-        # Note: W1 can be Resampled from D1. 4H can be Resampled from 15Min or 1H.
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=365) # 1 Year of data
         
@@ -236,52 +329,10 @@ def get_swing_signal(symbol, data_client: StockHistoricalDataClient):
         if h1_bars.empty: return None
         h1_bars = h1_bars.reset_index()
         
-        # 2. Analyze Structure (D1)
-        smc = SMCStructure()
-        bias_d1, swing_high, swing_low = smc.determine_bias(d1_bars)
-        
-        print(f"[{symbol}] D1 Bias: {bias_d1.upper()}")
-        
-        if bias_d1 == "neutral":
-             return None
-             
-        # 3. Premium/Discount Check
-        if not swing_high or not swing_low:
-             return None
-             
-        current_price = d1_bars['close'].iloc[-1]
-        pd_zone = smc.check_premium_discount(current_price, swing_high, swing_low)
-        print(f"[{symbol}] Zone: {pd_zone.upper()} (Range: {swing_low['price']} - {swing_high['price']})")
-        
-        # Bias-Zone Alignment Rule
-        if bias_d1 == "bullish" and pd_zone != "discount":
-            print(f"[{symbol}] Skip: Bullish but not in Discount.")
-            return None
-        if bias_d1 == "bearish" and pd_zone != "premium":
-            print(f"[{symbol}] Skip: Bearish but not in Premium.")
-            return None
-            
-        # 4. Liquidity & Entry Check (H1)
-        liq = SMCLiquidity()
-        
-        # Check for Sweep
-        has_sweep = liq.detect_liquidity_sweep(h1_bars, bias_d1, window=30)
-        print(f"[{symbol}] Liquidity Sweep: {has_sweep}")
-        
-        if not has_sweep:
-            # Strict Rule: No Sweep = No Trade
-            return None
-            
-        # Check for OB presence nearby
-        ob = liq.find_order_blocks(h1_bars, bias_d1)
-        if ob:
-            print(f"[{symbol}] Valid OB Found: {ob['type']} at {ob['high']}-{ob['low']}")
-            # Signal Generation
-            if bias_d1 == "bullish":
-                return "buy"
-            elif bias_d1 == "bearish":
-                return "sell"
-                
+        return analyze_swing_signal(d1_bars, h1_bars, symbol)
+
+    except Exception as e:
+        print(f"Error in get_swing_signal: {e}")
         return None
 
     except Exception as e:
