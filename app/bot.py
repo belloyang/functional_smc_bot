@@ -1120,9 +1120,12 @@ if __name__ == "__main__":
     parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--mode", type=str, choices=["day", "swing"], default="day", help="Trading Mode: 'day' (1m/15m SMC) or 'swing' (D1/H1 SMC)")
     
     args = parser.parse_args()
     target_symbol = args.symbol
+    mode = args.mode
+
     
     if args.options:
         print("Overriding ENABLE_OPTIONS to True from command line.")
@@ -1184,8 +1187,17 @@ if __name__ == "__main__":
 
                 # 2. Market is open, look for signals
                 timestamp_et = clock.timestamp.astimezone(ET)
-                print(f"Analyzing {target_symbol} at {timestamp_et}...")
-                sig = generate_signal(target_symbol)
+                print(f"Analyzing {target_symbol} at {timestamp_et} (Mode: {mode.upper()})...")
+                
+                sig = None
+                if mode == "swing":
+                    # Lazy Import to avoid circular dependencies if any
+                    from .swing_strategy import get_swing_signal
+                    # Pass the data_client instance for data fetching
+                    sig = get_swing_signal(target_symbol, data_client)
+                else:
+                    # Default Day Trading
+                    sig = generate_signal(target_symbol)
                 
                 if sig:
                     print(f"🚀 Signal detected: {sig.upper()}!")
@@ -1204,8 +1216,14 @@ if __name__ == "__main__":
                     print("Trade placed. Cooling down for 5 minutes...")
                     interruptible_sleep(300, session)
                 else:
-                    # No signal, wait 1 minute before checking again
-                    interruptible_sleep(60, session)
+                    # No signal
+                    if mode == "swing":
+                        # Swing mode doesn't need 1-minute polling. 15 mins is fine.
+                        print("No Swing Setup. Waiting 15 minutes...")
+                        interruptible_sleep(900, session)
+                    else:
+                        print("No Day Setup. Waiting 1 minute...")
+                        interruptible_sleep(60, session)
 
             except Exception as e:
                 print(f"An error occurred in the main loop: {e}")
