@@ -139,9 +139,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
-        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
+        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:45 PM ET) ---
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
-        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
+        trade_window_end = current_time_et.replace(hour=15, minute=45, second=0, microsecond=0)
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
@@ -200,14 +200,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                 # 3. Active Management
                 pl_pct = (price - entry_price) / entry_price
-                if pl_pct > 0.15 and active_trade['stop_loss'] < entry_price:
-                    active_trade['stop_loss'] = entry_price
-                    print(f"[{current_time_et}] 🛡️ STOCK MOVED SL TO BE ({entry_price:.2f})")
-                if pl_pct > 0.30:
-                    lock_price = entry_price * 1.15
-                    if active_trade['stop_loss'] < lock_price:
-                        active_trade['stop_loss'] = lock_price
-                        print(f"[{current_time_et}] 💰 STOCK LOCKED PROFIT ({lock_price:.2f})")
+                # --- STEPPED TRAILING STOP LOGIC ---
+                STEP_SIZE = 0.10
+                if pl_pct >= STEP_SIZE:
+                    milestone = int(pl_pct * 10) / 10.0
+                    lock_pct = milestone - 0.10
+                    target_stop = entry_price * (1 + lock_pct)
+                    
+                    if active_trade['stop_loss'] < target_stop:
+                        active_trade['stop_loss'] = target_stop
+                        if lock_pct <= 0.001:
+                             print(f"[{current_time_et}] 🛡️ BREAK EVEN: up {pl_pct*100:.1f}%. SL -> Entry ({target_stop:.2f})")
+                        else:
+                             print(f"[{current_time_et}] 💰 PROFIT LOCK: up {pl_pct*100:.1f}%. SL -> {target_stop:.2f} (+{lock_pct*100:.0f}%)")
 
             elif trade_type == "options":
                 time_held = current_time_utc - active_trade['entry_time']

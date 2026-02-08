@@ -838,57 +838,34 @@ def manage_trade_updates():
                 
                 continue
             
-            # Thresholds
-            BE_THRESHOLD = 0.15
-            LOCK_THRESHOLD = 0.30
+            # --- STEPPED TRAILING STOP LOGIC ---
+            # 1. Break Even if Profit > 10%
+            # 2. Lock 10% if Profit > 20%
+            # 3. Lock 20% if Profit > 30%
+            # ... and so on (Step 10%)
             
-            if pl_pct < BE_THRESHOLD:
-                continue
+            STEP_SIZE = 0.10
+            
+            if pl_pct >= STEP_SIZE:
+                # Calculate the milestone we have passed
+                # e.g. 0.25 -> floor(2.5) = 2 -> 2 * 0.10 = 0.20 milestone
+                # But we lock (Milestone - 0.10)
+                # 0.25 -> Milestone 0.20 -> Lock 0.10
+                # 0.15 -> Milestone 0.10 -> Lock 0.00 (BE)
                 
-            # Find the existing Stop Loss Order
-            # Warning: This finds ANY open Stop/StopLimit sell order for this symbol.
-            # In a complex bot with multiple positions per symbol, this is risky. 
-            # But for this bot (one pos per symbol), it is safe.
-            from alpaca.trading.requests import GetOrdersRequest
-            from alpaca.trading.enums import OrderStatus, QueryOrderStatus
-            
-            orders_req = GetOrdersRequest(
-                status=QueryOrderStatus.OPEN,
-                symbol=symbol,
-                side=OrderSide.SELL # Assuming we are closing a Long
-            )
-            open_orders = trade_client.get_orders(orders_req)
-            
-            stop_order = None
-            for o in open_orders:
-                # We look for STOP or STOP_LIMIT orders
-                if o.order_type in ['stop', 'stop_limit']:
-                    stop_order = o
-                    break
-            
-            if not stop_order:
-                continue
+                milestone = int(pl_pct * 10) / 10.0
+                lock_pct = milestone - 0.10
                 
-            current_stop = float(stop_order.stop_price) if stop_order.stop_price else 0.0
-            
-            # Logic: Move Stop UP only
-            new_stop = None
-            
-            # 2. Profit Lock (>30% gain -> Lock 15%)
-            if pl_pct > LOCK_THRESHOLD:
-                target_stop = entry_price * 1.15
-                if current_stop < target_stop:
+                target_stop = entry_price * (1 + lock_pct)
+                
+                # Only update if the new target is higher than current stop
+                # (and ensure we don't accidentally lower a manual stop if user set one higher, avoiding churn)
+                if target_stop > current_stop:
                     new_stop = target_stop
-                    print(f"💰 PROFIT LOCK: {symbol} is up {pl_pct*100:.1f}%. Moving SL to {new_stop:.2f} (+15%)")
-            
-            # 1. Break Even (>15% gain -> Move to Entry)
-            elif pl_pct > BE_THRESHOLD:
-                target_stop = entry_price
-                # Give it a tiny buffer so fees don't eat us? Entry * 1.005?
-                # Let's stick to raw entry for now.
-                if current_stop < target_stop:
-                    new_stop = target_stop
-                    print(f"🛡️ BREAK EVEN: {symbol} is up {pl_pct*100:.1f}%. Moving SL to Entry {new_stop:.2f}")
+                    if lock_pct <= 0.001: 
+                         print(f"🛡️ BREAK EVEN: {symbol} is up {pl_pct*100:.1f}%. Moving SL to Entry {new_stop:.2f}")
+                    else:
+                         print(f"💰 PROFIT LOCK: {symbol} is up {pl_pct*100:.1f}%. Moving SL to {new_stop:.2f} (+{lock_pct*100:.0f}%)")
 
             # Apply Update
             if new_stop:
