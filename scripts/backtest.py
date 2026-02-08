@@ -528,7 +528,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        output_dir = os.path.join(os.getcwd(), "backtest-output")
+        output_dir = os.path.join(os.getcwd(), "backtest-output", trade_type, symbol)
         os.makedirs(output_dir, exist_ok=True)
         plot_path = os.path.join(output_dir, f"backtest_{mode}_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
