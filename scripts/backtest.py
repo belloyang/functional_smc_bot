@@ -125,6 +125,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     daily_trade_count = 0
     last_trade_date = None
     last_exit_time = None # New: Track cool-down
+    day_starting_balance = initial_balance # Initialize for the first day
+    current_equity = initial_balance       # Initialize for first bar
+    daily_stop_hit = False # Initialize for the first day
     
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
@@ -252,18 +255,18 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # 3. Active Management (Hybrid Trailing)
                 pl_pct = (current_option_price - entry_price) / entry_price
                 
-                # Hybrid Strategy: +15% BE, +30% -> +10%, +40% -> +20%
-                if pl_pct >= 0.40:
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%
+                if pl_pct >= 0.30:
                     lock_price = entry_price * 1.20 # +20% SL
                     if active_trade['stop_loss'] < lock_price:
                         active_trade['stop_loss'] = lock_price
                         print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +20% ({lock_price:.2f})")
-                elif pl_pct >= 0.30:
+                elif pl_pct >= 0.20:
                     lock_price = entry_price * 1.10 # +10% SL
                     if active_trade['stop_loss'] < lock_price:
                         active_trade['stop_loss'] = lock_price
                         print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +10% ({lock_price:.2f})")
-                elif pl_pct >= 0.15 and active_trade['stop_loss'] < entry_price:
+                elif pl_pct >= 0.10 and active_trade['stop_loss'] < entry_price:
                     active_trade['stop_loss'] = entry_price
                     print(f"[{current_time_et}] 🛡️ OPTION TRAILING (HYBRID): MOVED TO BE ({entry_price:.2f})")
                 
@@ -281,11 +284,43 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                      last_exit_time = current_time_utc
                      continue
 
-        # --- DAILY TRADE CAP ---
+        # --- DAILY RESET AND LOSS LIMIT CHECK ---
         current_date = current_time_et.date()
         if last_trade_date != current_date:
             daily_trade_count = 0
             last_trade_date = current_date
+            day_starting_balance = current_equity # Reset for new day
+            daily_stop_hit = False
+
+        # Portfolio Loss Circuit Breaker (3% Daily Max)
+        daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
+        if daily_pnl_pct <= -0.03:
+             if not daily_stop_hit:
+                 print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-3%). STOPPING FOR DAY.")
+                 if position != 0:
+                     # Close position if hit
+                     if trade_type == "stock":
+                         balance += position * price
+                         pnl = (price - entry_price) * position
+                         trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': price, 'qty': position, 'pnl': pnl})
+                         position = 0
+                         active_trade = None
+                     elif trade_type == "options":
+                         # Re-calc option exit
+                         time_held = current_time_utc - active_trade['entry_time']
+                         days_passed = time_held.total_seconds() / (24 * 3600)
+                         T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                         exit_pr = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type=active_trade['type'])
+                         balance += exit_pr * 100 * abs(position)
+                         pnl = (exit_pr - entry_price) * 100 * abs(position)
+                         trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': exit_pr, 'qty': abs(position), 'pnl': pnl})
+                         position = 0
+                         active_trade = None
+                 daily_stop_hit = True
+             continue
+             
+        if daily_stop_hit:
+             continue
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
@@ -342,10 +377,16 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    existing_option_exposure = 0.0 # Parity with bot.py
-                    remaining_budget = total_budget - existing_option_exposure
+                    current_risk_target = balance * 0.02 # Risk 2% of total equity
                     
-                    qty = int(remaining_budget // contract_cost)
+                    # Risk per contract is 20% premium (our SL)
+                    risk_per_contract = premium * 0.20 * 100
+                    qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                    
+                    # Still capped by total option allocation budget
+                    qty_cap = int(total_budget // contract_cost)
+                    
+                    qty = min(qty_risk, qty_cap)
                     if qty > 5: qty = 5
                     
                     if qty >= 1 and balance >= (contract_cost * qty):
@@ -402,10 +443,15 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    existing_option_exposure = 0.0 # Parity with bot.py
-                    remaining_budget = total_budget - existing_option_exposure
+                    current_risk_target = balance * 0.02 # Risk 2% of total equity
                     
-                    qty = int(remaining_budget // contract_cost)
+                    # Risk per contract is 20% premium (our SL)
+                    risk_per_contract = premium * 0.20 * 100
+                    qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                    
+                    qty_cap = int(total_budget // contract_cost)
+                    
+                    qty = min(qty_risk, qty_cap)
                     if qty > 5: qty = 5
                     
                     if qty >= 1 and balance >= (contract_cost * qty):

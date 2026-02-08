@@ -579,7 +579,15 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
                     print(f"⚠️ WARNING: Insufficient Budget for {symbol} option. Global Remain: ${global_option_remaining:.2f}, Ticker Remain: ${ticker_remaining:.2f}. Need ${cost_per_contract:.2f}. Skipping.")
                     return
                 
-                qty = int(available_budget // cost_per_contract)
+                # 3. Risk-Based Position Sizing (Max 2% equity risk per trade)
+                current_risk_target = equity * 0.02  # Risk 2% of total equity
+                risk_per_contract = entry_est * 0.20 * 100  # 20% SL on premium
+                qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                
+                # Still capped by available budget
+                qty_cap = int(available_budget // cost_per_contract)
+                
+                qty = min(qty_risk, qty_cap)
                 if qty > 5:
                     print(f"DEBUG: Capping contracts from {qty} to 5.")
                     qty = 5
@@ -588,7 +596,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
                     print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
                     return
 
-                print(f"Sizing: Total Equity ${equity:.2f} | Available Budget ${available_budget:.2f} | Cost/Ctr ${cost_per_contract:.2f} | Final Qty: {qty}")
+                print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
                 
                 sl_req = StopLossRequest(stop_price=sl_price)
                 tp_req = TakeProfitRequest(limit_price=tp_price)
@@ -818,16 +826,16 @@ def manage_trade_updates():
                 # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
                 updated = False
                 
-                # Hybrid Strategy: +15% BE, +30% -> +10%, +40% -> +20%
-                if pl_pct >= 0.40 and virtual_stop < 0.20:
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%
+                if pl_pct >= 0.30 and virtual_stop < 0.20:
                     virtual_stop = 0.20
                     updated = True
                     print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +20%.")
-                elif pl_pct >= 0.30 and virtual_stop < 0.10:
+                elif pl_pct >= 0.20 and virtual_stop < 0.10:
                     virtual_stop = 0.10
                     updated = True
                     print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +10%.")
-                elif pl_pct >= 0.15 and virtual_stop < 0.0:
+                elif pl_pct >= 0.10 and virtual_stop < 0.0:
                     virtual_stop = 0.0
                     updated = True
                     print(f"🛡️ OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to BE (0%).")
@@ -915,11 +923,14 @@ class TradingSession:
         self.opening_equity = None
         self.opening_positions = []
         self.closed_trades = []  # List of dicts with {symbol, pnl, win}
+        self.day_starting_equity = None
+        self.daily_loss_limit_hit = False
         
         # Capture opening state
         try:
             account = trade_client.get_account()
             self.opening_equity = float(account.equity)
+            self.day_starting_equity = float(account.equity) # Initialize daily starting equity
             
             # Capture opening positions
             positions = trade_client.get_all_positions()
@@ -1178,7 +1189,39 @@ if __name__ == "__main__":
                     interruptible_sleep(900, session) # Wait 15 minutes
                     continue
 
-                # 2. Maintenance Tasks (Only run during market hours)
+                # 2. Daily Loss Limit Check (3%)
+                account = trade_client.get_account()
+                current_equity = float(account.equity)
+                current_date = timestamp_et.date()
+                
+                # Reset daily starting equity at start of new trading day
+                if session.day_starting_equity is None or (hasattr(session, 'last_trading_date') and session.last_trading_date != current_date):
+                    session.day_starting_equity = current_equity
+                    session.daily_loss_limit_hit = False
+                    session.last_trading_date = current_date
+                    print(f"🔄 New trading day. Starting equity: ${session.day_starting_equity:,.2f}")
+                
+                # Check daily loss limit
+                daily_pnl_pct = (current_equity - session.day_starting_equity) / session.day_starting_equity if session.day_starting_equity > 0 else 0
+                if daily_pnl_pct <= -0.03 and not session.daily_loss_limit_hit:
+                    print(f"🛑 DAILY LOSS LIMIT HIT (-3%). Current: ${current_equity:,.2f} | Start: ${session.day_starting_equity:,.2f} | Loss: {daily_pnl_pct*100:.2f}%")
+                    print("🛑 Closing all positions and stopping trading for today.")
+                    # Close all positions
+                    try:
+                        positions = trade_client.get_all_positions()
+                        for pos in positions:
+                            trade_client.close_position(pos.symbol)
+                            print(f"Closed {pos.symbol}")
+                    except Exception as e:
+                        print(f"⚠️ Error closing positions: {e}")
+                    session.daily_loss_limit_hit = True
+                
+                if session.daily_loss_limit_hit:
+                    print("⏸️ Daily loss limit active. Waiting until next trading day...")
+                    interruptible_sleep(900, session)  # Wait 15 minutes
+                    continue
+
+                # 3. Maintenance Tasks (Only run during market hours)
                 manage_option_expiry()
                 manage_trade_updates()
 
