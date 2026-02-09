@@ -811,12 +811,17 @@ async def manage_trade_updates(target_symbol):
             if not curr_price or curr_price <= 0 or np.isnan(curr_price):
                 # Final fallback to historical MIDPOINT
                 print(f"ℹ️ Market Data (Error 10089) - Falling back to Historical MIDPOINT for {symbol}...")
-                curr_price = await get_latest_price_fallback(symbol)
+                curr_price = await get_latest_price_fallback(contract)
                 
             if not curr_price or curr_price <= 0 or np.isnan(curr_price): continue
             
             curr_price = float(curr_price)
-            avg_cost = float(p.avgCost)
+            
+            # IBKR reports avgCost as total cost per contract (Price * 100)
+            # We must normalize it to per-share to compare with curr_price
+            multiplier = float(contract.multiplier) if contract.multiplier and float(contract.multiplier) > 1 else 1.0
+            avg_cost = float(p.avgCost) / multiplier
+            
             if avg_cost <= 0: continue
             
             is_long = (p.position > 0)
@@ -970,12 +975,15 @@ class TradingSession:
             
             positions = ib.positions()
             for p in positions:
+                multiplier = float(p.contract.multiplier) if p.contract.multiplier and float(p.contract.multiplier) > 1 else 1.0
+                entry_price = float(p.avgCost) / multiplier
+                
                 self.opening_positions.append({
                     'symbol': p.contract.localSymbol,
                     'qty': float(p.position),
                     'side': 'long' if p.position > 0 else 'short',
-                    'entry_price': float(p.avgCost),
-                    'market_value': float(p.position * p.avgCost), # Rough
+                    'entry_price': entry_price,
+                    'market_value': float(p.position * p.avgCost), # p.avgCost is already Price * Multiplier
                     'unrealized_pl': 0.0 # Requires ticker
                 })
         except Exception as e:
@@ -1031,11 +1039,14 @@ class TradingSession:
             
             positions = ib.positions()
             for p in positions:
+                multiplier = float(p.contract.multiplier) if p.contract.multiplier and float(p.contract.multiplier) > 1 else 1.0
+                entry_price = float(p.avgCost) / multiplier
+                
                 closing_positions.append({
                     'symbol': p.contract.localSymbol,
                     'qty': float(p.position),
                     'side': 'long' if p.position > 0 else 'short',
-                    'entry_price': float(p.avgCost),
+                    'entry_price': entry_price,
                     'current_price': 0.0, # Requires ticker
                     'market_value': float(p.position * p.avgCost),
                     'unrealized_pl': 0.0,
