@@ -653,7 +653,14 @@ if __name__ == "__main__":
     
     # Handle budgets
     stock_budget = args.stock_budget if args.stock_budget is not None else getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
-    option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.30)
+    
+    # Use mode-specific option allocation if not explicitly provided
+    if args.option_budget is not None:
+        option_budget = args.option_budget
+    elif args.mode == "swing":
+        option_budget = getattr(config, 'SWING_OPTIONS_ALLOCATION_PCT', 0.30)
+    else:  # day mode
+        option_budget = getattr(config, 'DAY_OPTIONS_ALLOCATION_PCT', 0.15)
     
     
     trade_type = "options" if args.options else "stock"

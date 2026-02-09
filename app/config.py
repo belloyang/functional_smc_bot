@@ -64,5 +64,7 @@ ENABLE_OPTIONS = False # Set to True to trade options instead of shares
 
 # --- RISK MANAGEMENT ---
 STOCK_ALLOCATION_PCT = 0.80   # Max 80% of equity for stock positions per ticker
-OPTIONS_ALLOCATION_PCT = 0.30 # Max 30% of equity for all option premiums (Global)
+DAY_OPTIONS_ALLOCATION_PCT = 0.15   # Max 15% of equity for day trading options
+SWING_OPTIONS_ALLOCATION_PCT = 0.30 # Max 30% of equity for swing trading options
+OPTIONS_ALLOCATION_PCT = DAY_OPTIONS_ALLOCATION_PCT  # Backward compatibility (defaults to day trading)
 DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
