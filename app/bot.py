@@ -1117,9 +1117,7 @@ async def main():
     try:
         while session.should_continue():
             try:
-                # 0. Maintenance Tasks
-                await manage_option_expiry()
-                await manage_trade_updates()
+                now_et = datetime.now(ZoneInfo("America/New_York"))
                 
                 # 1. Market Hours Filter
                 is_open, status_msg = is_market_open()
@@ -1129,9 +1127,15 @@ async def main():
                     continue
 
                 # 2. Daily Loss Limit Check (3%)
-                account = trade_client.get_account()
-                current_equity = float(account.equity)
-                current_date = timestamp_et.date()
+                # Fetch equity from IBKR
+                current_equity = 10000.0
+                acc_values = ibkr_mgr.ib.accountValues()
+                for v in acc_values:
+                    if v.tag == 'NetLiquidation':
+                        current_equity = float(v.value)
+                        break
+                        
+                current_date = now_et.date()
                 
                 # Reset daily starting equity at start of new trading day
                 if session.day_starting_equity is None or (hasattr(session, 'last_trading_date') and session.last_trading_date != current_date):
@@ -1145,24 +1149,23 @@ async def main():
                 if daily_pnl_pct <= -0.03 and not session.daily_loss_limit_hit:
                     print(f"🛑 DAILY LOSS LIMIT HIT (-3%). Current: ${current_equity:,.2f} | Start: ${session.day_starting_equity:,.2f} | Loss: {daily_pnl_pct*100:.2f}%")
                     print("🛑 Closing all positions and stopping trading for today.")
-                    # Close all positions
+                    # Close all positions in IBKR
                     try:
-                        positions = trade_client.get_all_positions()
-                        for pos in positions:
-                            trade_client.close_position(pos.symbol)
-                            print(f"Closed {pos.symbol}")
+                        ibkr_mgr.ib.reqGlobalCancel() # Cancel open orders
+                        positions = ibkr_mgr.ib.positions()
+                        for p in positions:
+                            action = 'SELL' if p.position > 0 else 'BUY'
+                            close_order = MarketOrder(action, abs(p.position))
+                            ibkr_mgr.ib.placeOrder(p.contract, close_order)
+                            print(f"Closed {p.contract.localSymbol}")
                     except Exception as e:
                         print(f"⚠️ Error closing positions: {e}")
                     session.daily_loss_limit_hit = True
                 
                 if session.daily_loss_limit_hit:
                     print("⏸️ Daily loss limit active. Waiting until next trading day...")
-                    interruptible_sleep(900, session)  # Wait 15 minutes
+                    await interruptible_sleep(900, session)  # Wait 15 minutes
                     continue
-
-                # 3. Maintenance Tasks (Only run during market hours)
-                manage_option_expiry()
-                manage_trade_updates()
 
                 # 2. Market is open, look for signals
                 print(f"Analyzing {target_symbol} at {now_et}...")
