@@ -613,7 +613,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
                 # Update daily count
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
-                save_trade_state(state)
+                save_trade_state(state, symbol=symbol)
                 return
 
             except Exception as e:
@@ -671,7 +671,7 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
                 # Update daily count
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
-                save_trade_state(state)
+                save_trade_state(state, symbol=symbol)
             except Exception as e:
                 print(f"❌ Order failed: {e}")
         
@@ -709,20 +709,14 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
         else:
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
 
+def load_initial_ticker_state(symbol):
+    """Helper to load state for a specific symbol at startup or loop start."""
+    state = load_trade_state(symbol=symbol)
+    return state.get(symbol, {}), state
 
-
-def parse_option_expiry(symbol):
-    # Regex to capture YYMMDD from SPY251219C00500000
-    # Format: Root(up to 6 chars) + YYMMDD + Type(C/P) + Strike
-    match = re.search(r'[A-Z]+(\d{6})[CP]', symbol)
-    if match:
-        date_str = match.group(1)
-        return datetime.strptime(date_str, "%y%m%d")
-    return None
-
-def manage_option_expiry():
+def manage_option_expiry(target_symbol=None):
     """
-    Checks all open option positions.
+    Checks all open option positions for the target symbol.
     1. Critical (<= 1 Day): Force Close.
     2. Stale (<= 3 Days): Decay Exit (2/3 time rule).
     """
@@ -735,6 +729,9 @@ def manage_option_expiry():
         
         for pos in positions:
             if pos.asset_class != 'us_option':
+                continue
+            
+            if target_symbol and not pos.symbol.startswith(target_symbol):
                 continue
                 
             expiry = parse_option_expiry(pos.symbol)
@@ -759,25 +756,44 @@ from alpaca.trading.requests import ReplaceOrderRequest
 
 # ================= STATE MANAGEMENT =================
 
-STATE_FILE = "trade_state.json"
+STATE_FILE = "trade_state.json"  # Default fallback
 
-def load_trade_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"⚠️ Error loading state: {e}")
+def get_state_file_path(symbol=None):
+    """Returns the state file path, prioritized by --state-file then symbol-specific."""
+    if hasattr(args, 'state_file') and args.state_file:
+        return args.state_file
+    if symbol:
+        return f"trade_state_{symbol}.json"
+    return STATE_FILE
+
+def load_trade_state(symbol=None):
+    file_path = get_state_file_path(symbol)
+    if os.path.exists(file_path):
+        for attempt in range(3):
+            try:
+                with open(file_path, "r") as f:
+                    return json.load(f)
+            except (IOError, json.JSONDecodeError) as e:
+                if attempt < 2:
+                    time.sleep(0.5)
+                    continue
+                print(f"⚠️ Error loading state from {file_path}: {e}")
     return {}
 
-def save_trade_state(state):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=4)
-    except Exception as e:
-        print(f"⚠️ Error saving state: {e}")
+def save_trade_state(state, symbol=None):
+    file_path = get_state_file_path(symbol)
+    for attempt in range(3):
+        try:
+            with open(file_path, "w") as f:
+                json.dump(state, f, indent=4)
+            return
+        except IOError as e:
+            if attempt < 2:
+                time.sleep(0.5)
+                continue
+            print(f"⚠️ Error saving state to {file_path}: {e}")
 
-def manage_trade_updates():
+def manage_trade_updates(target_symbol=None):
     """
     Monitors active trades and adjusts Stop Losses.
     1. Break-Even: If Profit > 15%, move SL to Entry.
@@ -787,6 +803,8 @@ def manage_trade_updates():
         positions = trade_client.get_all_positions()
         for pos in positions:
             symbol = pos.symbol
+            if target_symbol and not symbol.startswith(target_symbol):
+                continue
             # Skip if we can't determine direction clearly (assuming Long for simplicity or checking side)
             # Both Stock Long and Option Long (Call/Put) have side='long' in Position object typically
             is_long = pos.side == 'long'
@@ -798,7 +816,7 @@ def manage_trade_updates():
             
             # --- OPTIONS RISK MANAGEMENT (Manual) ---
             if pos.asset_class == 'us_option':
-                state = load_trade_state()
+                state = load_trade_state(symbol=symbol)
                 symbol_state = state.get(symbol, {"virtual_stop": -0.20}) # Default -20% SL
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
@@ -813,14 +831,14 @@ def manage_trade_updates():
                     # Cleanup state
                     if symbol in state:
                         del state[symbol]
-                        save_trade_state(state)
+                        save_trade_state(state, symbol=symbol)
                     continue
                 elif pl_pct >= OPTION_TP:
                     print(f"🎯 OPTION TAKE PROFIT HIT: {symbol} at {pl_pct*100:.1f}%. Closing.")
                     trade_client.close_position(symbol)
                     if symbol in state:
                         del state[symbol]
-                        save_trade_state(state)
+                        save_trade_state(state, symbol=symbol)
                     continue
                 
                 # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
@@ -842,7 +860,7 @@ def manage_trade_updates():
                 
                 if updated:
                     state[symbol] = {"virtual_stop": virtual_stop}
-                    save_trade_state(state)
+                    save_trade_state(state, symbol=symbol)
                 
                 continue
             
@@ -895,7 +913,7 @@ def manage_trade_updates():
     try:
         current_positions = trade_client.get_all_positions()
         held_symbols = {p.symbol for p in current_positions}
-        state = load_trade_state()
+        state = load_trade_state(symbol=target_symbol)
         state_symbols = list(state.keys())
         cleaned = False
         for s in state_symbols:
@@ -903,7 +921,7 @@ def manage_trade_updates():
                 del state[s]
                 cleaned = True
         if cleaned:
-            save_trade_state(state)
+            save_trade_state(state, symbol=target_symbol)
     except Exception:
         pass
 
@@ -1131,6 +1149,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--state-file", type=str, help="Override state file path (default: trade_state_{symbol}.json)")
     
     args = parser.parse_args()
     target_symbol = args.symbol
@@ -1224,8 +1243,8 @@ if __name__ == "__main__":
                     continue
 
                 # 3. Maintenance Tasks (Only run during market hours)
-                manage_option_expiry()
-                manage_trade_updates()
+                manage_option_expiry(target_symbol=target_symbol)
+                manage_trade_updates(target_symbol=target_symbol)
 
                 # 2. Market is open, look for signals
                 timestamp_et = clock.timestamp.astimezone(ET)
