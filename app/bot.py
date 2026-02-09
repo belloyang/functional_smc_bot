@@ -397,7 +397,7 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
         return
 
     # --- DAILY TRADE CAP ---
-    state = load_trade_state()
+    state = load_trade_state(symbol)
     today_str = now_et.strftime("%Y-%m-%d")
     
     ticker_state = state.get(symbol, {})
@@ -584,7 +584,7 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                 # Update state
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
-                save_trade_state(state)
+                save_trade_state(state, symbol)
                 return
 
             except Exception as e:
@@ -614,7 +614,7 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                 print("✅ BUY BRACKET ORDER SUBMITTED")
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
-                save_trade_state(state)
+                save_trade_state(state, symbol)
             except Exception as e:
                 print(f"❌ Order failed: {e}")
         
@@ -664,18 +664,20 @@ async def manage_option_expiry():
     """
     Checks all open option positions for expiry in IBKR.
     """
-    if not getattr(config, 'ENABLE_OPTIONS', False):
-        return
-        
+async def manage_option_expiry(target_symbol):
+    ib = ibkr_mgr.ib
+    """
+    Checks for options expiring today and force closes them if RTH is open.
+    """
     try:
-        positions = ib.positions()
         now = datetime.now()
-        
+        positions = ib.positions()
         for p in positions:
-            if not isinstance(p.contract, Option):
-                continue
-                
-            # IBKR Option contracts have 'lastTradeDateOrContractMonth' (YYYYMMDD)
+            if not isinstance(p.contract, Option): continue
+            
+            # Filter by target symbol
+            if p.contract.symbol != target_symbol: continue
+            
             expiry_str = p.contract.lastTradeDateOrContractMonth
             expiry = datetime.strptime(expiry_str, "%Y%m%d")
             
@@ -700,23 +702,33 @@ from alpaca.trading.requests import ReplaceOrderRequest
 
 STATE_FILE = "trade_state.json"
 
-def load_trade_state():
-    if os.path.exists(STATE_FILE):
+def get_state_file_path(symbol=None):
+    """Returns the state file path, prioritized by --state-file then symbol-specific."""
+    if 'args' in globals() and hasattr(args, 'state_file') and args.state_file:
+        return args.state_file
+    if symbol:
+        return f"trade_state_{symbol}.json"
+    return STATE_FILE
+
+def load_trade_state(symbol=None):
+    path = get_state_file_path(symbol)
+    if os.path.exists(path):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(path, "r") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"⚠️ Error loading state: {e}")
+            print(f"⚠️ Error loading state from {path}: {e}")
     return {}
 
-def save_trade_state(state):
+def save_trade_state(state, symbol=None):
+    path = get_state_file_path(symbol)
     try:
-        with open(STATE_FILE, "w") as f:
+        with open(path, "w") as f:
             json.dump(state, f, indent=4)
     except Exception as e:
-        print(f"⚠️ Error saving state: {e}")
+        print(f"⚠️ Error saving state to {path}: {e}")
 
-async def manage_trade_updates():
+async def manage_trade_updates(target_symbol):
     ib = ibkr_mgr.ib
     """
     Asynchronous trade updates for IBKR (Hybrid Trailing SL).
@@ -725,7 +737,7 @@ async def manage_trade_updates():
         positions = ib.positions()
         for p in positions:
             symbol = p.contract.symbol
-            if symbol != SYMBOL: continue
+            if symbol != target_symbol: continue
             
             ticker = ib.ticker(p.contract)
             # Only request if not already streaming (checking all tickers)
@@ -756,7 +768,7 @@ async def manage_trade_updates():
 
             # --- OPTIONS RISK MANAGEMENT ---
             if isinstance(p.contract, Option):
-                state = load_trade_state()
+                state = load_trade_state(symbol)
                 symbol_state = state.get(symbol, {"virtual_stop": -0.20})
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
@@ -766,14 +778,14 @@ async def manage_trade_updates():
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
                     ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
-                    if symbol in state: del state[symbol]; save_trade_state(state)
+                    if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
                 elif pl_pct >= 0.50: # TP 50%
                     print(f"🎯 OPTION TP HIT: {p.contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
                     ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
-                    if symbol in state: del state[symbol]; save_trade_state(state)
+                    if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
 
                 # Trailing logic
@@ -795,7 +807,7 @@ async def manage_trade_updates():
                 
                 if updated:
                     state[symbol] = {"virtual_stop": virtual_stop}
-                    save_trade_state(state)
+                    save_trade_state(state, symbol)
                 continue
 
             # --- STOCK TRAILING ---
@@ -837,7 +849,7 @@ async def manage_trade_updates():
     try:
         current_positions = ib.positions()
         held_symbols = {p.contract.symbol for p in current_positions}
-        state = load_trade_state()
+        state = load_trade_state(target_symbol)
         state_symbols = list(state.keys())
         cleaned = False
         for s in state_symbols:
@@ -845,7 +857,7 @@ async def manage_trade_updates():
                 del state[s]
                 cleaned = True
         if cleaned:
-            save_trade_state(state)
+            save_trade_state(state, target_symbol)
     except Exception:
         pass
 
@@ -1100,7 +1112,9 @@ async def main():
     parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--state-file", type=str, help="Custom path to the trade state JSON file")
     
+    global args
     args = parser.parse_args()
     target_symbol = args.symbol
     
@@ -1179,6 +1193,10 @@ async def main():
                     print("⏸️ Daily loss limit active. Waiting until next trading day...")
                     await interruptible_sleep(900, session)  # Wait 15 minutes
                     continue
+
+                # 3. Active Trade Management (Trailing Stops & Option Expiry)
+                await manage_trade_updates(target_symbol)
+                await manage_option_expiry(target_symbol)
 
                 # 2. Market is open, look for signals
                 print(f"Analyzing {target_symbol} at {now_et}...")
