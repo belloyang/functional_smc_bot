@@ -334,37 +334,80 @@ from alpaca.trading.enums import AssetStatus, ContractType
 async def get_best_option_contract(symbol, signal_type, known_price=None):
     ib = ibkr_mgr.ib
     """
-    Finds the best option contract using IBKR reqContractDetails.
+    Finds the best option contract using dynamic expiry and strike discovery.
     """
     try:
+        # 1. Get current price
         if known_price:
             current_price = known_price
         else:
             current_price_df = await get_bars(symbol, "1Min", 1)
             if current_price_df.empty:
-                return None
-            current_price = current_price_df['close'].iloc[-1]
+                # Stock bar fallback
+                print(f"ℹ️ Could not get bars for {symbol} to calculate strike. Using fallback price check.")
+                current_price = await get_latest_price_fallback(symbol)
+                if not current_price: return None
+            else:
+                current_price = current_price_df['close'].iloc[-1]
 
-        # Define Option Right and Target Strike
+        # 2. Get Underlying Contract for conId
+        underlying = Stock(symbol, 'SMART', 'USD')
+        qualified_underlying = await ib.qualifyContractsAsync(underlying)
+        if not qualified_underlying:
+            print(f"❌ Could not qualify underlying stock for {symbol}")
+            return None
+        underlying_conId = qualified_underlying[0].conId
+
+        # 3. Get Option Parameters
+        print(f"🔍 Fetching option parameters for {symbol}...")
+        chains = await ib.reqSecDefOptParamsAsync(underlying.symbol, '', underlying.secType, underlying_conId)
+        if not chains:
+            print(f"❌ No option chains found for {symbol}")
+            return None
+        
+        # Pick SMART exchange chain
+        chain = next((c for c in chains if c.exchange == 'SMART'), chains[0])
+        
+        # 4. Filter Expiries (3-14 days out)
+        now = datetime.now()
+        valid_expiries = []
+        for exp in chain.expirations:
+            dt_exp = datetime.strptime(exp, "%Y%m%d")
+            days_to_expiry = (dt_exp - now).days
+            if 3 <= days_to_expiry <= 14:
+                valid_expiries.append(exp)
+        
+        if not valid_expiries:
+            # Fallback: pick the first available expiry if none in range
+            print("⚠️ No expiries in 3-14 day range. Using first available.")
+            valid_expiries = chain.expirations[:1]
+            
+        target_expiry = valid_expiries[0]
+        
+        # 5. Pick ATM Strike
+        target_strike = sorted(chain.strikes, key=lambda x: abs(x - current_price))[0]
         right = 'C' if signal_type == "buy" else 'P'
         
-        # In a real scenario, we'd query chains. For IBKR MVP, we'll try to find a near-ATM
-        # expiring in 1-2 weeks.
-        target_strike = round(current_price)
+        print(f"🎯 Selected Option Setup: {symbol} {target_expiry} ${target_strike} {right}")
+
+        # 6. Create and Qualify Contract
+        contract = Option(symbol, target_expiry, target_strike, right, 'SMART')
+        qualified = await ib.qualifyContractsAsync(contract)
         
-        # Search for contracts
-        contract = Option(symbol, '20260213', target_strike, right, 'SMART') # Hardcoded expiry for example, should be dynamic
-        # Real logic: use ib.reqSecDefOptParams and then find best
-        
-        details = await ib.reqContractDetailsAsync(contract)
-        if not details:
-            print(f"No option contracts found for {symbol} {right}")
+        if not qualified:
+            print(f"❌ Failed to qualify option contract: {contract.localSymbol}")
             return None
             
-        return details[0].contract
+        res_contract = qualified[0]
+        # Force exchange to 'SMART' to prevent Error 321 if it comes back empty
+        res_contract.exchange = 'SMART'
+        
+        return res_contract
 
     except Exception as e:
         print(f"Error getting option contract: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_current_position(symbol):
@@ -659,11 +702,6 @@ def parse_option_expiry(symbol):
         return datetime.strptime(date_str, "%y%m%d")
     return None
 
-async def manage_option_expiry():
-    ib = ibkr_mgr.ib
-    """
-    Checks all open option positions for expiry in IBKR.
-    """
 async def manage_option_expiry(target_symbol):
     ib = ibkr_mgr.ib
     """
@@ -677,21 +715,30 @@ async def manage_option_expiry(target_symbol):
             
             # Filter by target symbol
             if p.contract.symbol != target_symbol: continue
+
+            contract = p.contract
+            # Ensure contract is qualified (has exchange)
+            if not contract.exchange:
+                print(f"🔍 Qualifying contract for {contract.localSymbol}...")
+                qualified = await ib.qualifyContractsAsync(contract)
+                if qualified:
+                    contract = qualified[0]
+                    contract.exchange = 'SMART' # Force SMART
             
-            expiry_str = p.contract.lastTradeDateOrContractMonth
+            expiry_str = contract.lastTradeDateOrContractMonth
             expiry = datetime.strptime(expiry_str, "%Y%m%d")
             
             is_expiry_day = (now.date() >= expiry.date())
             
             if is_expiry_day:
-                print(f"⚠️ CRITICAL: {p.contract.localSymbol} expires TODAY! Force Closing.")
+                print(f"⚠️ CRITICAL: {contract.localSymbol} expires TODAY! Force Closing.")
                 # Close with Market Order
                 action = 'SELL' if p.position > 0 else 'BUY'
                 close_order = MarketOrder(action, abs(p.position))
-                ib.placeOrder(p.contract, close_order)
+                ib.placeOrder(contract, close_order)
             else:
                 days_left = (expiry.date() - now.date()).days
-                print(f"DEBUG: {p.contract.localSymbol} DTE: {days_left} days - Safe")
+                print(f"DEBUG: {contract.localSymbol} DTE: {days_left} days - Safe")
 
     except Exception as e:
         print(f"Error in manage_option_expiry: {e}")
@@ -739,11 +786,20 @@ async def manage_trade_updates(target_symbol):
             symbol = p.contract.symbol
             if symbol != target_symbol: continue
             
-            ticker = ib.ticker(p.contract)
+            contract = p.contract
+            # Ensure contract is qualified (has exchange)
+            if not contract.exchange:
+                print(f"🔍 Qualifying contract for updates on {contract.localSymbol}...")
+                qualified = await ib.qualifyContractsAsync(contract)
+                if qualified:
+                    contract = qualified[0]
+                    contract.exchange = 'SMART' # Force SMART
+
+            ticker = ib.ticker(contract)
             # Only request if not already streaming (checking all tickers)
             if ticker not in ib.tickers():
-                print(f"DEBUG: Starting data stream for {p.contract.localSymbol}...")
-                ib.reqMktData(p.contract)
+                print(f"DEBUG: Starting data stream for {contract.localSymbol}...")
+                ib.reqMktData(contract)
             
             if not ticker: continue
                 
@@ -765,26 +821,26 @@ async def manage_trade_updates(target_symbol):
             
             is_long = (p.position > 0)
             pl_pct = (curr_price - avg_cost) / avg_cost if is_long else (avg_cost - curr_price) / avg_cost
-
+ 
             # --- OPTIONS RISK MANAGEMENT ---
-            if isinstance(p.contract, Option):
+            if isinstance(contract, Option):
                 state = load_trade_state(symbol)
                 symbol_state = state.get(symbol, {"virtual_stop": -0.20})
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
                 # Exit Triggers
                 if pl_pct <= virtual_stop:
-                    print(f"🛑 OPTION STOP HIT: {p.contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
+                    print(f"🛑 OPTION STOP HIT: {contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
-                    ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
+                    ib.placeOrder(contract, MarketOrder(action, abs(p.position)))
                     if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
                 elif pl_pct >= 0.50: # TP 50%
-                    print(f"🎯 OPTION TP HIT: {p.contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
+                    print(f"🎯 OPTION TP HIT: {contract.localSymbol} at {pl_pct*100:.1f}%. Closing.")
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
-                    ib.placeOrder(p.contract, MarketOrder(action, abs(p.position)))
+                    ib.placeOrder(contract, MarketOrder(action, abs(p.position)))
                     if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
 
