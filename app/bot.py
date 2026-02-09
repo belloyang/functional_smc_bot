@@ -1183,6 +1183,8 @@ if __name__ == "__main__":
             try:
                 # 1. Check if market is open FIRST
                 clock = trade_client.get_clock()
+                timestamp_et = clock.timestamp.astimezone(ET)
+                
                 if not clock.is_open:
                     next_open_et = clock.next_open.astimezone(ET)
                     print(f"🕒 Market is CLOSED. Next open: {next_open_et.strftime('%Y-%m-%d %H:%M:%S')}. Waiting 15 minutes...")
