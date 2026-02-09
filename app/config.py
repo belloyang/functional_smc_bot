@@ -35,8 +35,24 @@ API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_API_SECRET")
 BASE_URL = "https://paper-api.alpaca.markets"
 SYMBOL = "SPY" # default symbol
-TIMEFRAME_HTF = "15Min"
-TIMEFRAME_LTF = "1Min"
+
+# --- TRADING MODE ---
+TRADING_MODE = "day"  # "day" or "swing"
+
+# --- DAY TRADE SETTINGS ---
+DAY_TIMEFRAME_HTF = "15Min"
+DAY_TIMEFRAME_LTF = "1Min"
+DAY_DAILY_LOSS_LIMIT = 0.03  # 3% daily loss limit
+
+# --- SWING TRADE SETTINGS ---
+SWING_TIMEFRAME_HTF = "1Day"
+SWING_TIMEFRAME_LTF = "4Hour"
+SWING_DRAWDOWN_LIMIT = 0.10  # 10% from peak equity
+SWING_POSITION_HOLD_MIN_DAYS = 3  # Minimum hold period
+
+# Backward compatibility - will be overridden by mode-specific settings
+TIMEFRAME_HTF = DAY_TIMEFRAME_HTF
+TIMEFRAME_LTF = DAY_TIMEFRAME_LTF
 
 RISK_PER_TRADE = 0.01  # 1%
 try:
@@ -48,5 +64,5 @@ ENABLE_OPTIONS = False # Set to True to trade options instead of shares
 
 # --- RISK MANAGEMENT ---
 STOCK_ALLOCATION_PCT = 0.80   # Max 80% of equity for stock positions per ticker
-OPTIONS_ALLOCATION_PCT = 0.15 # Max 15% of equity for all option premiums (Global)
+OPTIONS_ALLOCATION_PCT = 0.30 # Max 30% of equity for all option premiums (Global)
 DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided

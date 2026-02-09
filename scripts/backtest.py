@@ -19,6 +19,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
+from app.swing_strategy import get_swing_signal, get_last_swing_low as get_swing_low, get_last_swing_high as get_swing_high
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -41,11 +42,19 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20, mode="day"):
     if symbol is None:
         symbol = config.SYMBOL
+    
+    # Set timeframes based on mode
+    if mode == "swing":
+        tf_htf_str = config.SWING_TIMEFRAME_HTF
+        tf_ltf_str = config.SWING_TIMEFRAME_LTF
+    else:
+        tf_htf_str = config.DAY_TIMEFRAME_HTF
+        tf_ltf_str = config.DAY_TIMEFRAME_LTF
         
-    print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
+    print(f"Starting backtest for {symbol} over last {days_back} days (Mode: {mode}, Type: {trade_type})...")
     
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
@@ -53,11 +62,24 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days_back + 20) # Extra data for vol calc
     
-    # HTF Data (15 Min)
+    # HTF Data
     print("Fetching HTF data...")
+    # Parse timeframe string (e.g., "15Min", "1Day", "4Hour")
+    if "Min" in tf_htf_str:
+        htf_value = int(tf_htf_str.replace("Min", ""))
+        htf_tf = TimeFrame(htf_value, TimeFrameUnit.Minute)
+    elif "Hour" in tf_htf_str:
+        htf_value = int(tf_htf_str.replace("Hour", ""))
+        htf_tf = TimeFrame(htf_value, TimeFrameUnit.Hour)
+    elif "Day" in tf_htf_str:
+        htf_value = int(tf_htf_str.replace("Day", ""))
+        htf_tf = TimeFrame(htf_value, TimeFrameUnit.Day)
+    else:
+        htf_tf = TimeFrame(15, TimeFrameUnit.Minute)  # Fallback
+    
     htf_req = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+        timeframe=htf_tf,
         start=start_time,
         end=end_time,
         feed="iex"
@@ -67,11 +89,23 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print("No HTF data found.")
         return
 
-    # LTF Data (1 Min)
+    # LTF Data
     print("Fetching LTF data...")
+    if "Min" in tf_ltf_str:
+        ltf_value = int(tf_ltf_str.replace("Min", ""))
+        ltf_tf = TimeFrame(ltf_value, TimeFrameUnit.Minute)
+    elif "Hour" in tf_ltf_str:
+        ltf_value = int(tf_ltf_str.replace("Hour", ""))
+        ltf_tf = TimeFrame(ltf_value, TimeFrameUnit.Hour)
+    elif "Day" in tf_ltf_str:
+        ltf_value = int(tf_ltf_str.replace("Day", ""))
+        ltf_tf = TimeFrame(ltf_value, TimeFrameUnit.Day)
+    else:
+        ltf_tf = TimeFrame(1, TimeFrameUnit.Minute)  # Fallback
+    
     ltf_req = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+        timeframe=ltf_tf,
         start=start_time,
         end=end_time,
         feed="iex"
@@ -129,7 +163,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     current_equity = initial_balance       # Initialize for first bar
     daily_stop_hit = False # Initialize for the first day
     
-    start_idx = 400 # Warmup for vol and indicators
+    # Adjust start_idx based on mode and available data
+    if mode == "swing":
+        start_idx = min(200, len(ltf_data) - 1)  # 200 for EMA200, but cap at data length
+    else:
+        start_idx = min(400, len(ltf_data) - 1)  # 400 for day mode warmup
+    
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
     from zoneinfo import ZoneInfo
@@ -143,13 +182,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         current_time_et = current_time_utc.astimezone(ET)
         
         # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
-        trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
-        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
-        
-        in_window = (trade_window_start <= current_time_et <= trade_window_end)
-        
-        # We don't 'continue' here because we still want to manage open positions
-        # outside the entry window (e.g. for stops/targets during the first 30 mins).
+        # Define trading window based on mode
+        if mode == "day":
+            trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
+            trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
+            in_window = trade_window_start <= current_time_et <= trade_window_end
+        else:
+            # Swing mode: always in window during market hours
+            in_window = True
 
         # --- DAYS BACK ENFORCEMENT ---
         # We fetched extra data for warmup, but we only want to trade starting from days_back
@@ -166,8 +206,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         htf_slice = htf_slice.iloc[-200:] # Limit to last 200 HTF for speed
         ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
         
-        # Run Strategy
-        signal = get_strategy_signal(htf_slice, ltf_slice)
+        # Run Strategy (route based on mode)
+        if mode == "swing":
+            signal = get_swing_signal(htf_slice, ltf_slice)
+        else:
+            signal = get_strategy_signal(htf_slice, ltf_slice)
         
         price = current_bar['close']
         
@@ -372,7 +415,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.02 # Risk 2% of total equity
+                    current_risk_target = balance * 0.05 # Risk 5% of total equity (increased from 2% for expensive options)
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100
@@ -438,7 +481,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.02 # Risk 2% of total equity
+                    current_risk_target = balance * 0.05 # Risk 5% of total equity (increased from 2% for expensive options)
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100
@@ -592,6 +635,7 @@ if __name__ == "__main__":
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
     parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%)")
     parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%)")
+    parser.add_argument("--mode", type=str, default="day", choices=["day", "swing"], help="Trading mode: 'day' for intraday or 'swing' for multi-day/week positions (default: day)")
     
     args = parser.parse_args()
     
@@ -609,7 +653,9 @@ if __name__ == "__main__":
     
     # Handle budgets
     stock_budget = args.stock_budget if args.stock_budget is not None else getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
-    option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.30)
     
-    mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget)
+    
+    trade_type = "options" if args.options else "stock"
+    trading_mode = args.mode
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=trade_type, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget, mode=trading_mode)
