@@ -408,17 +408,29 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                 elif trade_type == "options":
                     strike = round(price)
-                    days_to_expiry = 7
+                    
+                    # Mode-specific parameters
+                    if mode == "swing":
+                        days_to_expiry = 21  # 3 weeks for swing trades
+                        stop_loss_pct = 0.60  # -40% (wider stops for multi-day holds)
+                        take_profit_pct = 2.00  # +100% (higher targets)
+                        risk_pct = 0.03  # 3% risk (more conservative)
+                    else:  # day mode
+                        days_to_expiry = 7   # 1 week for day trades
+                        stop_loss_pct = 0.80  # -20%
+                        take_profit_pct = 1.50  # +50%
+                        risk_pct = 0.05  # 5% risk
+                    
                     T = days_to_expiry / 365.0
                     sigma = current_vol if current_vol > 0 else 0.2
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.05 # Risk 5% of total equity (increased from 2% for expensive options)
+                    current_risk_target = balance * risk_pct
                     
-                    # Risk per contract is 20% premium (our SL)
-                    risk_per_contract = premium * 0.20 * 100
+                    # Risk per contract based on stop-loss percentage
+                    risk_per_contract = premium * (1 - stop_loss_pct) * 100
                     qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
                     
                     # Still capped by total option allocation budget
@@ -440,8 +452,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
                             'entry_time': current_time_utc,
                             'type': 'call',
-                            'stop_loss': premium * 0.80, # -20%
-                            'take_profit': premium * 1.50 # +50%
+                            'stop_loss': premium * stop_loss_pct,
+                            'take_profit': premium * take_profit_pct
                         }
 
                         trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
@@ -475,16 +487,28 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
-                    days_to_expiry = 7
+                    
+                    # Mode-specific parameters (same as CALL logic)
+                    if mode == "swing":
+                        days_to_expiry = 21  # 3 weeks for swing trades
+                        stop_loss_pct = 0.60  # -40% (wider stops for multi-day holds)
+                        take_profit_pct = 2.00  # +100% (higher targets)
+                        risk_pct = 0.03  # 3% risk (more conservative)
+                    else:  # day mode
+                        days_to_expiry = 7   # 1 week for day trades
+                        stop_loss_pct = 0.80  # -20%
+                        take_profit_pct = 1.50  # +50%
+                        risk_pct = 0.05  # 5% risk
+                    
                     sigma = current_vol if current_vol > 0 else 0.2
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.05 # Risk 5% of total equity (increased from 2% for expensive options)
+                    current_risk_target = balance * risk_pct
                     
-                    # Risk per contract is 20% premium (our SL)
-                    risk_per_contract = premium * 0.20 * 100
+                    # Risk per contract based on stop-loss percentage
+                    risk_per_contract = premium * (1 - stop_loss_pct) * 100
                     qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
                     
                     qty_cap = int(total_budget // contract_cost)
@@ -505,8 +529,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
                             'entry_time': current_time_utc,
                             'type': 'put',
-                            'stop_loss': premium * 0.80,
-                            'take_profit': premium * 1.50 # +50%
+                            'stop_loss': premium * stop_loss_pct,
+                            'take_profit': premium * take_profit_pct
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
