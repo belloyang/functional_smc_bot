@@ -779,12 +779,6 @@ async def manage_trade_updates():
                     virtual_stop = 0.0
                     updated = True
                     print(f"🛡️ OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to BE (0%).")
-                if pl_pct >= 0.40 and virtual_stop < 0.20:
-                    virtual_stop = 0.20; updated = True
-                elif pl_pct >= 0.30 and virtual_stop < 0.10:
-                    virtual_stop = 0.10; updated = True
-                elif pl_pct >= 0.15 and virtual_stop < 0.0:
-                    virtual_stop = 0.0; updated = True
                 
                 if updated:
                     state[symbol] = {"virtual_stop": virtual_stop}
