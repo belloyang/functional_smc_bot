@@ -40,8 +40,9 @@ class IBKRManager:
                 config.IBKR_PORT, 
                 clientId=config.IBKR_CLIENT_ID
             )
-            self._ib.reqMarketDataType(3) # Use delayed data if live is not available
-            print("Successfully connected to IBKR (using Delayed Market Data).")
+            self._ib.reqMarketDataType(3)  # Use delayed data if live is not available
+            self._ib.reqMarketDataType(4)  # Use delayed frozen if delayed is not available
+            print("Successfully connected to IBKR (using Delayed/Frozen Market Data).")
             return True
         except Exception as e:
             print(f"Failed to connect to IBKR: {e}")

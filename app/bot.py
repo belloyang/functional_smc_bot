@@ -3,6 +3,7 @@ import numpy as np
 import pandas_ta as ta
 import re
 import json
+from unittest.mock import patch
 import os
 import signal
 import sys
@@ -30,7 +31,7 @@ RISK_PER_TRADE = config.RISK_PER_TRADE
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-async def get_bars(symbol, timeframe, limit):
+async def get_bars(contract_or_symbol, timeframe, limit):
     """
     Fetch historical bars from IBKR.
     """
@@ -40,8 +41,13 @@ async def get_bars(symbol, timeframe, limit):
     elif '1Day' in timeframe:
         bar_size = '1 day'
 
-    # Create Contract
-    contract = Stock(symbol, 'SMART', 'USD')
+    # Create or use Contract
+    if isinstance(contract_or_symbol, Contract):
+        contract = contract_or_symbol
+        symbol = contract.symbol
+    else:
+        symbol = contract_or_symbol
+        contract = Stock(symbol, 'SMART', 'USD')
     
     # Using reqHistoricalDataAsync for non-blocking fetch
     # Using 'MIDPOINT' which is often available without a full subscription
@@ -51,7 +57,7 @@ async def get_bars(symbol, timeframe, limit):
         durationStr='1 W',
         barSizeSetting=bar_size,
         whatToShow='MIDPOINT',
-        useRTH=True,
+        useRTH=False,
         formatDate=1,
         keepUpToDate=False
     )
@@ -69,16 +75,18 @@ async def get_bars(symbol, timeframe, limit):
         
     return df
 
-async def get_latest_price_fallback(symbol):
+async def get_latest_price_fallback(contract_or_symbol):
     """
     Fetches the latest close price from historical data if real-time ticker fails.
     """
     try:
-        df = await get_bars(symbol, "1Min", 1)
+        # Use 1Min bars as most granular fallback
+        df = await get_bars(contract_or_symbol, "1Min", 1)
         if not df.empty:
             return float(df['close'].iloc[-1])
     except Exception as e:
-        print(f"Error in price fallback for {symbol}: {e}")
+        sym = contract_or_symbol.symbol if isinstance(contract_or_symbol, Contract) else contract_or_symbol
+        print(f"Error in price fallback for {sym}: {e}")
     return None
 
 # ================= SMC LOGIC (CAUSAL) =================
@@ -518,7 +526,12 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
                     # For options, MIDPOINT historical data via get_bars might not work without subscription
                     # but we try ticker.marketPrice() as a last resort
                     entry_est = ticker.marketPrice()
-                    
+                
+                if not entry_est or entry_est <= 0 or np.isnan(entry_est):
+                    # --- NEW FALLBACK: Historical Midpoint ---
+                    print(f"ℹ️ Attempting historical MIDPOINT fallback for {opt_contract.localSymbol}...")
+                    entry_est = await get_latest_price_fallback(opt_contract)
+
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
