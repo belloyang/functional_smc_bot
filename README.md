@@ -23,7 +23,7 @@ python3.12 -m pip install -r requirements.txt
 ## Configuration
 Update `app/config.py` for global defaults:
 - `STOCK_ALLOCATION_PCT`: Max % of equity for stock positions per ticker (default: 0.80).
-- `OPTIONS_ALLOCATION_PCT`: Max % of equity for all option premiums (Global) (default: 0.20).
+- `OPTIONS_ALLOCATION_PCT`: Max % of equity for all option premiums (Global) (default: 0.15).
 - `DEFAULT_DAILY_CAP`: Max number of trades per ticker per day.
 
 Set your Alpaca API credentials:
@@ -49,7 +49,7 @@ python3.12 scripts/backtest.py QQQ --days 90 --balance 2500
 - `--options`: Run with options simulation instead of stock
 - `--cap`: Daily trade cap (-1 for unlimited)
 - `--stock-budget`: % of balance for stock sizing (default: 0.80)
-- `--option-budget`: % of balance for option sizing (default: 0.20)
+- `--option-budget`: % of balance for option sizing (default: 0.15)
 
 # Run live trading
 
