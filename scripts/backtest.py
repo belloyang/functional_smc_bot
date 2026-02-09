@@ -142,9 +142,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
-        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
+        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:45 PM ET) ---
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
-        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
+        trade_window_end = current_time_et.replace(hour=15, minute=45, second=0, microsecond=0)
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
