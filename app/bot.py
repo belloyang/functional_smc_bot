@@ -714,6 +714,15 @@ def load_initial_ticker_state(symbol):
     state = load_trade_state(symbol=symbol)
     return state.get(symbol, {}), state
 
+def parse_option_expiry(symbol):
+    # Regex to capture YYMMDD from SPY251219C00500000
+    # Format: Root(up to 6 chars) + YYMMDD + Type(C/P) + Strike
+    match = re.search(r'[A-Z]+(\d{6})[CP]', symbol)
+    if match:
+        date_str = match.group(1)
+        return datetime.strptime(date_str, "%y%m%d")
+    return None
+
 def manage_option_expiry(target_symbol=None):
     """
     Checks all open option positions for the target symbol.
