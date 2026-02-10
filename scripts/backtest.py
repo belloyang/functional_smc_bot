@@ -595,8 +595,8 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
-    parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%)")
-    parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%)")
+    parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%%)")
+    parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%%)")
     
     args = parser.parse_args()
     
