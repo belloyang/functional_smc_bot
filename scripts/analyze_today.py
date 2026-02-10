@@ -4,6 +4,7 @@ import pandas_ta as ta
 import sys
 import os
 import time
+import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -59,7 +60,36 @@ def process_bars(htf_df, ltf_df):
     ltf = detect_order_block(ltf)
     return htf, ltf
 
-def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals):
+def send_discord_notification(signal, price, time_str, symbol, bias):
+    """Sends a signal alert to Discord via Webhook."""
+    if not config.DISCORD_WEBHOOK_URL:
+        return
+        
+    color = 0x2ca02c if signal == "BUY" else 0xd62728 # Green for Buy, Red for Sell
+    
+    payload = {
+        "embeds": [{
+            "title": f"🚨 {signal} SIGNAL Detected!",
+            "color": color,
+            "fields": [
+                {"name": "Symbol", "value": f"**{symbol}**", "inline": True},
+                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Time (ET)", "value": time_str, "inline": True},
+                {"name": "Bias", "value": bias, "inline": True},
+                {"name": "Strategy", "value": "SMC Order Block + Impulse", "inline": False}
+            ],
+            "footer": {"text": "Alpaca Live Monitor"},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+    
+    try:
+        response = requests.post(config.DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"⚠️ Failed to send Discord notification: {e}")
+
+def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals, symbol, is_live=False):
     """Checks if a signal exists at a specific timestamp and prints if new."""
     # Find the HTF bar that JUST CLOSED before or at this timestamp
     htf_closed_bars = htf_data[htf_data.index <= timestamp]
@@ -91,6 +121,10 @@ def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals):
         print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
         print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
         print("-" * 40)
+        
+        if is_live:
+            send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias)
+            
         return True
     return False
 
@@ -132,7 +166,7 @@ def analyze_today_signals(symbol="SPY"):
     
     signals_count = 0
     for ts, row in scan_bars.iterrows():
-        if check_for_signal(ts, row, htf_processed, ET, reported_signals):
+        if check_for_signal(ts, row, htf_processed, ET, reported_signals, symbol, is_live=False):
             signals_count += 1
             
     if signals_count == 0:
@@ -166,7 +200,7 @@ def analyze_today_signals(symbol="SPY"):
                 # Check the last 3 bars just in case of slight polling delay
                 latest_bars = l_proc.iloc[-3:]
                 for ts, row in latest_bars.iterrows():
-                    check_for_signal(ts, row, h_proc, ET, reported_signals)
+                    check_for_signal(ts, row, h_proc, ET, reported_signals, symbol, is_live=True)
                     
         except KeyboardInterrupt:
             print("\n🛑 Monitoring stopped by user.")
