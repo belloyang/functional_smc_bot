@@ -28,7 +28,8 @@ load_env()
 # --- IBKR SETTINGS ---
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497")) # 7497 for paper, 7496 for live
-IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", 1))
+# set IBKR_CLIENT_ID to a random number to avoid conflicts
+IBKR_CLIENT_ID = random.randint(1, 1000)
 
 # --- ALPACA (BACKWARD COMPATIBILITY) ---
 API_KEY = os.getenv("ALPACA_API_KEY")
