@@ -38,7 +38,7 @@ trade_client = config.trading_client
 from alpaca.data.historical import OptionHistoricalDataClient
 option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 def get_bars(symbol, timeframe, limit):
