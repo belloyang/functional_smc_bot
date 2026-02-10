@@ -1359,7 +1359,7 @@ if __name__ == "__main__":
                 timestamp_et = clock.timestamp.astimezone(ET)
                 print(f"Analyzing {target_symbol} at {timestamp_et}...")
                 res = generate_signal(target_symbol)
-                if res:
+                if res and res[0] is not None:
                     sig, conf = res if isinstance(res, tuple) else (res, 0)
                     
                     if conf < min_conf_threshold:
