@@ -12,7 +12,10 @@ from zoneinfo import ZoneInfo
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import get_strategy_signal, detect_fvg, detect_order_block
+from app.bot import (
+    get_strategy_signal, detect_fvg, detect_order_block,
+    calculate_confidence, get_confidence_label, send_discord_notification
+)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -56,38 +59,11 @@ def process_bars(htf_df, ltf_df):
     ltf.sort_index(inplace=True)
     
     htf['ema50'] = ta.ema(htf['close'], length=50)
+    
+    # Calculate rolling stats (already done in bot.detect_order_block, but ensures consistency)
     ltf = detect_fvg(ltf)
     ltf = detect_order_block(ltf)
     return htf, ltf
-
-def send_discord_notification(signal, price, time_str, symbol, bias):
-    """Sends a signal alert to Discord via Webhook."""
-    if not config.DISCORD_WEBHOOK_URL:
-        return
-        
-    color = 0x2ca02c if signal == "BUY" else 0xd62728 # Green for Buy, Red for Sell
-    
-    payload = {
-        "embeds": [{
-            "title": f"🚨 {signal} SIGNAL Detected!",
-            "color": color,
-            "fields": [
-                {"name": "Symbol", "value": f"**{symbol}**", "inline": True},
-                {"name": "Price", "value": f"${price:.2f}", "inline": True},
-                {"name": "Time (ET)", "value": time_str, "inline": True},
-                {"name": "Bias", "value": bias, "inline": True},
-                {"name": "Strategy", "value": "SMC Order Block + Impulse", "inline": False}
-            ],
-            "footer": {"text": "Alpaca Live Monitor"},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }]
-    }
-    
-    try:
-        response = requests.post(config.DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"⚠️ Failed to send Discord notification: {e}")
 
 def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals, symbol, is_live=False):
     """Checks if a signal exists at a specific timestamp and prints if new."""
@@ -116,14 +92,17 @@ def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals, symbol,
         reported_signals[sig_id] = timestamp
         time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
         
-        print(f"🚨 {signal} SIGNAL at {time_et}")
+        confidence = calculate_confidence(ltf_row, last_htf)
+        label = get_confidence_label(confidence)
+        
+        print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
         print(f"   Price: ${ltf_row['close']:.2f}")
         print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
         print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
         print("-" * 40)
         
         if is_live:
-            send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias)
+            send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
             
         return True
     return False

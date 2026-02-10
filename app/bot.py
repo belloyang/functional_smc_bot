@@ -8,6 +8,7 @@ import signal
 import sys
 import argparse
 import time
+import requests
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
@@ -135,6 +136,11 @@ def detect_order_block(df):
     # Identify impulse (large body candles)
     body_size = abs(df['close'] - df['open'])
     avg_body = body_size.rolling(20).mean()
+    avg_vol = df['volume'].rolling(20).mean()
+    
+    df['body_size'] = body_size
+    df['avg_body'] = avg_body
+    df['avg_vol'] = avg_vol
     df['impulse'] = body_size > (avg_body * 1.5) # Arbitrary threshold for "strong" move
     
     # We are looking for where an OB *was* formed. 
@@ -162,6 +168,74 @@ def detect_order_block(df):
 def detect_structure_shift(df):
     # Not fully implemented in causal way for this snippet, relying on simpler OB/Impulse logic
     return df
+
+def calculate_confidence(ltf_row, last_htf):
+    """Calculates a confidence score between 0-100%."""
+    score = 0
+    
+    # 1. Impulse Intensity (40%)
+    if ltf_row.get('avg_body', 0) > 0:
+        ratio = ltf_row['body_size'] / ltf_row['avg_body']
+        impulse_score = min(40, max(0, (ratio - 1.5) / 1.5 * 40))
+        score += impulse_score
+
+    # 2. Volume Confirmation (20%)
+    if ltf_row.get('avg_vol', 0) > 0:
+        vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
+        vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
+        score += vol_score
+        
+    # 3. FVG Confluence (20%)
+    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
+        score += 20
+        
+    # 4. Trend Proximity (20%)
+    price = ltf_row['close']
+    ema = last_htf.get('ema50')
+    if ema:
+        dist_pct = abs(price - ema) / ema
+        if dist_pct < 0.002:
+            score += 20
+        elif dist_pct < 0.005:
+            score += 10
+    
+    return int(min(100, score))
+
+def get_confidence_label(score):
+    if score >= 80: return "🔥🔥 High"
+    if score >= 50: return "📈 Medium"
+    return "⚖️ Low"
+
+def send_discord_notification(signal, price, time_str, symbol, bias, confidence):
+    """Sends a signal alert to Discord via Webhook."""
+    webhook_url = getattr(config, 'DISCORD_WEBHOOK_URL', None)
+    if not webhook_url:
+        return
+        
+    color = 0x2ca02c if signal.upper() == "BUY" else 0xd62728
+    label = get_confidence_label(confidence)
+    
+    payload = {
+        "embeds": [{
+            "title": f"🚀 {signal.upper()} Signal Dispatched!",
+            "color": color,
+            "fields": [
+                {"name": "Symbol", "value": f"**{symbol}**", "inline": True},
+                {"name": "Confidence", "value": f"**{confidence}%** ({label})", "inline": True},
+                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Time (ET)", "value": time_str, "inline": True},
+                {"name": "Bias", "value": bias.upper(), "inline": True},
+                {"name": "Strategy", "value": "SMC Order Block + Impulse", "inline": False}
+            ],
+            "footer": {"text": "Alpaca Bot Live"},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+    
+    try:
+        requests.post(webhook_url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Discord Notification Failed: {e}")
 
 def liquidity_sweep(df):
     # Not fully implemented in causal way for this snippet
@@ -201,6 +275,7 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     last_closed = ltf.iloc[-1]
     
     signal = None
+    confidence = 0
     
     if bias == "bullish":
         # Trigger: We just had a bullish impulse (OB creation)
@@ -211,7 +286,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         if last_closed['is_bear_ob_candle']:
              signal = "sell"
 
-    return signal
+    if signal:
+        confidence = calculate_confidence(last_closed, htf.iloc[-1])
+
+    return signal, confidence
 
 def generate_signal(symbol=None):
     if symbol is None:
@@ -377,7 +455,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -708,6 +786,17 @@ def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=None, stock_
                  
         else:
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
+
+    # 4. Final Notification
+    if signal in ["buy", "sell"]:
+        time_str = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p")
+        # We only send notification if a trade was actually SUBMITTED, 
+        # but place_trade is called whenever there's a signal.
+        # So we check if we submitted an order in the logic above? 
+        # Actually it's better to send it here to confirm the SIGNAL was processed.
+        bias = "BULLISH" if signal == "buy" else "BEARISH"
+        # Do not send discord notification for now
+        # send_discord_notification(signal, price, time_str, symbol, bias, confidence)
 
 def load_initial_ticker_state(symbol):
     """Helper to load state for a specific symbol at startup or loop start."""
@@ -1258,15 +1347,16 @@ if __name__ == "__main__":
                 # 2. Market is open, look for signals
                 timestamp_et = clock.timestamp.astimezone(ET)
                 print(f"Analyzing {target_symbol} at {timestamp_et}...")
-                sig = generate_signal(target_symbol)
-                
-                if sig:
-                    print(f"🚀 Signal detected: {sig.upper()}!")
+                res = generate_signal(target_symbol)
+                if res:
+                    sig, conf = res if isinstance(res, tuple) else (res, 0)
+                    print(f"🚀 Signal detected: {sig.upper()}! Confidence: {conf}%")
                     # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
                     place_trade(
                         sig, 
                         target_symbol, 
+                        confidence=conf,
                         use_daily_cap=use_cap, 
                         daily_cap_value=daily_cap if use_cap else None,
                         stock_budget_override=args.stock_budget,
