@@ -260,8 +260,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     
     if len(htf) < 50: return None # Not enough data
     
-    # Check the LAST closed candle for bias
-    bias = "bullish" if htf['close'].iloc[-1] > htf['ema50'].iloc[-1] else "bearish"
+    # Check the LAST closed candle for bias. 
+    # To be strictly causal, we use iloc[-1] assuming the caller has removed any incomplete bars.
+    last_htf = htf.iloc[-1]
+    bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
     
     # 2. LTF Analysis
     ltf = ltf.copy()

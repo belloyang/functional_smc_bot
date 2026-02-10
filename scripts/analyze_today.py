@@ -65,52 +65,69 @@ def process_bars(htf_df, ltf_df):
     ltf = detect_order_block(ltf)
     return htf, ltf
 
-def check_for_signal(timestamp, ltf_row, htf_data, ET, reported_signals, symbol, is_live=False):
+def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
     """Checks if a signal exists at a specific timestamp and prints if new."""
-    # Find the HTF bar that JUST CLOSED before or at this timestamp
-    htf_closed_bars = htf_data[htf_data.index <= timestamp]
-    if len(htf_closed_bars) < 50:
+    # To avoid look-ahead bias, HTF bias must be based on the last bar that CLOSED before 'timestamp'.
+    # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
+    htf_causal = htf_data[htf_data.index <= (timestamp - timedelta(minutes=15))]
+    if len(htf_causal) < 50:
         return False
         
-    last_htf = htf_closed_bars.iloc[-1]
+    # We also need a slice of LTF data ending at THIS row for indicator context if needed.
+    # However, row itself has OB/FVG pre-calculated.
+    # We can create a 1-row LTF slice for compatibility with get_strategy_signal.
+    ltf_slice = ltf_data[ltf_data.index <= timestamp].iloc[-200:]
+    
+    res = get_strategy_signal(htf_causal, ltf_slice)
+    if not res: return False
+    
+    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
+    if signal_raw is None: return False
+    
+    # Check Confidence Threshold
+    if confidence < min_conf_val:
+        return False
+        
+    signal = signal_raw.upper()
+    
+    # Avoid duplicate printing within 5 minutes of same signal
+    sig_id = f"{signal}_{timestamp.date()}"
+    last_sig_time = reported_signals.get(sig_id)
+    
+    if last_sig_time and (timestamp - last_sig_time).total_seconds() < 300:
+        return False
+        
+    reported_signals[sig_id] = timestamp
+    time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
+    
+    label = get_confidence_label(confidence)
+    last_htf = htf_causal.iloc[-1]
     bias = "BULLISH" if last_htf['close'] > last_htf['ema50'] else "BEARISH"
     
-    signal = None
-    if bias == "BULLISH" and ltf_row['is_bull_ob_candle']:
-        signal = "BUY"
-    elif bias == "BEARISH" and ltf_row['is_bear_ob_candle']:
-        signal = "SELL"
+    print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
+    print(f"   Price: ${ltf_row['close']:.2f}")
+    print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
+    print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
+    print("-" * 40)
+    
+    if is_live:
+        send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
         
-    if signal:
-        # Avoid duplicate printing within 5 minutes of same signal
-        sig_id = f"{signal}_{timestamp.date()}"
-        last_sig_time = reported_signals.get(sig_id)
-        
-        if last_sig_time and (timestamp - last_sig_time).total_seconds() < 300:
-            return False
-            
-        reported_signals[sig_id] = timestamp
-        time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
-        
-        confidence = calculate_confidence(ltf_row, last_htf)
-        label = get_confidence_label(confidence)
-        
-        print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
-        print(f"   Price: ${ltf_row['close']:.2f}")
-        print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
-        print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
-        print("-" * 40)
-        
-        if is_live:
-            send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
-            
-        return True
-    return False
+    return True
 
-def analyze_today_signals(symbol="SPY"):
+def analyze_today_signals(symbol="SPY", min_conf_str="all"):
     ET = ZoneInfo("US/Eastern")
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     reported_signals = {} # To track and dedup signals
+    
+    # Map confidence choices to numeric thresholds
+    CONF_THRESHOLDS = {
+        'all': 0,
+        'low': 20,
+        'medium': 50,
+        'high': 80
+    }
+    min_conf_val = CONF_THRESHOLDS.get(min_conf_str, 0)
     
     now_et = datetime.now(ET)
     market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -145,7 +162,7 @@ def analyze_today_signals(symbol="SPY"):
     
     signals_count = 0
     for ts, row in scan_bars.iterrows():
-        if check_for_signal(ts, row, htf_processed, ET, reported_signals, symbol, is_live=False):
+        if check_for_signal(ts, row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
             signals_count += 1
             
     if signals_count == 0:
@@ -179,7 +196,7 @@ def analyze_today_signals(symbol="SPY"):
                 # Check the last 3 bars just in case of slight polling delay
                 latest_bars = l_proc.iloc[-3:]
                 for ts, row in latest_bars.iterrows():
-                    check_for_signal(ts, row, h_proc, ET, reported_signals, symbol, is_live=True)
+                    check_for_signal(ts, row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
                     
         except KeyboardInterrupt:
             print("\n🛑 Monitoring stopped by user.")
@@ -192,5 +209,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Live or Historical signal analysis for SPY/SLV")
     parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
     args = parser.parse_args()
-    analyze_today_signals(args.symbol)
+    analyze_today_signals(args.symbol, args.min_conf)

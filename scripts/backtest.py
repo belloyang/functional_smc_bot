@@ -157,8 +157,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if current_time_utc < simulation_start_time:
             continue
             
-        # Get HTF data up to current_time
-        htf_slice = htf_data[htf_data.index <= current_time_utc]
+        # Get HTF data up to current_time (Causal: HTF bar must be CLOSED)
+        # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
+        htf_slice = htf_data[htf_data.index <= (current_time_utc - timedelta(minutes=15))]
         if len(htf_slice) < 50:
             continue
             
