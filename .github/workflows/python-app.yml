@@ -6,13 +6,11 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   schedule:
-    # Runs at 9:30 AM New York time (Eastern Time) Monday-Friday
-    # During EDT (Daylight Saving Time): 9:30 AM EDT = 1:30 PM UTC (13:30)
-    # During EST (Standard Time): 9:30 AM EST = 2:30 PM UTC (14:30)
+    # Runs at 9:45 AM New York time (Eastern Time) Monday-Friday
+    # During EDT (Daylight Saving Time): 9:45 AM EDT = 1:45 PM UTC (13:45)
+    # During EST (Standard Time): 9:45 AM EST = 2:45 PM UTC (14:45)
     # Note: GitHub Actions uses UTC and does not auto-adjust for DST.
-    # This schedule uses 13:30 UTC for EDT (March-November).
-    # For EST period, manually update to '30 14 * * 1-5' or adjust bot runtime.
-    - cron: '30 13 * * 1-5'
+    - cron: '45 14 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -72,6 +70,6 @@ jobs:
         ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
         ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
       run: |
-        # Run the bot for 10 hours session
-        # Scheduled to run Monday-Friday at 9:30 AM New York time
-        python -m app.bot SPY --session-duration 10
+        # Run the bot for 6 hour session
+        # Scheduled to run Monday-Friday at 9:45 AM New York time
+        python -m app.bot SLV --session-duration 6
