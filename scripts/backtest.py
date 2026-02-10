@@ -41,7 +41,7 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20, min_conf_val=0):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -167,7 +167,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
         
         # Run Strategy
-        signal = get_strategy_signal(htf_slice, ltf_slice)
+        res = get_strategy_signal(htf_slice, ltf_slice)
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
         
         price = current_bar['close']
         
@@ -325,9 +326,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # --- ENTRY LOGIC ---
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
-            # Check daily cap if enabled
+            # Check confidence threshold and daily cap
+            conf_ok = (confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
-            if position == 0 and in_window and trade_count_ok:
+            
+            if position == 0 and in_window and trade_count_ok and conf_ok:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -431,9 +434,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
-            # Check daily cap if enabled
+            # Check confidence threshold and daily cap
+            conf_ok = (confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
-            if position == 0 and in_window and trade_count_ok:
+            
+            if position == 0 and in_window and trade_count_ok and conf_ok:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -597,6 +602,7 @@ if __name__ == "__main__":
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
     parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%%)")
     parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%%)")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     
     args = parser.parse_args()
     
@@ -616,5 +622,14 @@ if __name__ == "__main__":
     stock_budget = args.stock_budget if args.stock_budget is not None else getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
     option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
     
+    # Handle confidence thresholds
+    CONF_THRESHOLDS = {
+        'all': 0,
+        'low': 20,
+        'medium': 50,
+        'high': 80
+    }
+    min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
+    
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget)
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget, min_conf_val=min_conf_val)

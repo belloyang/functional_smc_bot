@@ -1248,6 +1248,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
     parser.add_argument("--state-file", type=str, help="Override state file path (default: trade_state_{symbol}.json)")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     
     args = parser.parse_args()
     target_symbol = args.symbol
@@ -1291,6 +1292,16 @@ if __name__ == "__main__":
         print(f"Session Duration: {args.session_duration} hours")
     if args.max_trades:
         print(f"Max Trades: {args.max_trades}")
+    print(f"Min Confidence Filter: {args.min_conf.upper()}")
+    
+    # Map confidence choices to numeric thresholds
+    CONF_THRESHOLDS = {
+        'all': 0,
+        'low': 20,
+        'medium': 50,
+        'high': 80
+    }
+    min_conf_threshold = CONF_THRESHOLDS.get(args.min_conf, 0)
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
@@ -1350,6 +1361,13 @@ if __name__ == "__main__":
                 res = generate_signal(target_symbol)
                 if res:
                     sig, conf = res if isinstance(res, tuple) else (res, 0)
+                    
+                    if conf < min_conf_threshold:
+                        print(f"⚠️  Signal {sig.upper()} detected but SKIPPED (Confidence {conf}% < {args.min_conf.upper()} threshold)")
+                        # Wait 1 minute and check again
+                        interruptible_sleep(60, session)
+                        continue
+
                     print(f"🚀 Signal detected: {sig.upper()}! Confidence: {conf}%")
                     # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
