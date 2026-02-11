@@ -46,6 +46,15 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         symbol = config.SYMBOL
         
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
+    if trade_type == "options":
+        # With a 20% premium stop, max premium per contract allowed by risk rule is:
+        # risk_target / (0.20 * 100)
+        risk_target = initial_balance * 0.02
+        max_premium_by_risk = risk_target / 20 if risk_target > 0 else 0
+        print(
+            f"Options sizing guardrails -> option_budget_pct={option_budget_pct:.2f}, "
+            f"risk_target=${risk_target:.2f}, max_premium_for_1_contract_by_risk=${max_premium_by_risk:.2f}"
+        )
     
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
@@ -167,7 +176,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
         
         # Run Strategy
-        signal = get_strategy_signal(htf_slice, ltf_slice)
+        signal, confidence = get_strategy_signal(htf_slice, ltf_slice)
         
         price = current_bar['close']
         
@@ -403,6 +412,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                         trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                    else:
+                        print(
+                            f"[{current_time_et}] SKIP CALL: qty={qty}, premium={premium:.2f}, "
+                            f"contract_cost={contract_cost:.2f}, risk_target={current_risk_target:.2f}, "
+                            f"risk_per_contract={risk_per_contract:.2f}, budget={total_budget:.2f}"
+                        )
 
             elif position < 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'put'):
                 # Exit Bearish Position due to Bullish Signal Flip
@@ -467,6 +482,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                    else:
+                        print(
+                            f"[{current_time_et}] SKIP PUT: qty={qty}, premium={premium:.2f}, "
+                            f"contract_cost={contract_cost:.2f}, risk_target={current_risk_target:.2f}, "
+                            f"risk_per_contract={risk_per_contract:.2f}, budget={total_budget:.2f}"
+                        )
 
             elif position > 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'call'):
                 # Exit Bullish Position due to Bearish Signal Flip
@@ -576,7 +597,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         output_dir = os.path.join(os.getcwd(), "backtest-output", trade_type, symbol)
         os.makedirs(output_dir, exist_ok=True)
-        plot_path = os.path.join(output_dir, f"backtest_{mode}_{symbol}_{initial_balance}_{days_back}.png")
+        plot_path = os.path.join(output_dir, f"backtest_{trade_type}_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
         print(f"\n📊 Equity curve saved to: {plot_path}")
 
@@ -591,7 +612,11 @@ if __name__ == "__main__":
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
     parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%)")
-    parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%)")
+    parser.add_argument(
+        "--option-budget",
+        type=float,
+        help=f"Percentage of balance to use for per-trade option allocation (default from config: {getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20):.2f})"
+    )
     
     args = parser.parse_args()
     
