@@ -122,8 +122,8 @@ def analyze_today_signals(symbol="SPY"):
         # Check last candle
         last_ltf = ltf_analysis.iloc[-1]
         
-        # Get signal
-        signal = get_strategy_signal(htf_slice, ltf_slice)
+        # Get signal result (tuple: signal, confidence)
+        res = get_strategy_signal(htf_slice, ltf_slice)
         
         # Detailed output
         print(f"\n⏰ Time: {check_time.strftime('%I:%M %p ET')}")
@@ -141,8 +141,12 @@ def analyze_today_signals(symbol="SPY"):
         print(f"      - Impulse: {last_ltf.get('impulse', False)}")
         print(f"   Recent 10 candles: {bull_ob_count} bull OB, {bear_ob_count} bear OB")
         
-        if signal:
-            print(f"   🚨 SIGNAL: {signal.upper()}")
+        if res:
+            signal, confidence = res if isinstance(res, tuple) else (res, 0)
+            if signal:
+                print(f"   🚨 SIGNAL: {signal.upper()} | Confidence: {confidence}%")
+            else:
+                print(f"   ❌ No Signal")
         else:
             print(f"   ❌ No Signal")
             

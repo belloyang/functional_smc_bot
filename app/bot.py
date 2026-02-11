@@ -302,35 +302,95 @@ def liquidity_sweep(df):
     # Not fully implemented in causal way for this snippet
     return df
 
+def calculate_confidence(ltf_row, htf_row):
+    """
+    Calculates a confidence score (0-100) based on signal quality.
+    """
+    score = 0
+    # 1. OB Quality (Impulse Strength)
+    body_size = abs(ltf_row['close'] - ltf_row['open'])
+    # We don't have avg_body here easily, but we can use the fact it's an impulse
+    score += 30 # Base score for having an OB at all
+    
+    # 2. HTF Alignment Strength (Distance from EMA50)
+    # Higher distance = stronger trend
+    dist_pct = abs(htf_row['close'] - htf_row['ema50']) / htf_row['ema50']
+    score += min(40, dist_pct * 4000) # Max 40 points for 1% distance
+    
+    # 3. FVG Presence (Concrete gap indicates strong momentum)
+    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
+        score += 30
+        
+    return int(min(100, score))
+
+def get_confidence_label(score):
+    if score >= 80: return "🚀 High"
+    if score >= 50: return "📈 Medium"
+    return "⚖️ Low"
+
+def send_discord_notification(signal, price, time_et, symbol, bias, confidence):
+    webhook_url = getattr(config, 'DISCORD_WEBHOOK_URL', None)
+    if not webhook_url:
+        return
+        
+    label = get_confidence_label(confidence)
+    color = 0x00ff00 if signal.lower() == "buy" else 0xff0000
+    
+    payload = {
+        "embeds": [{
+            "title": f"🚨 {signal.upper()} SIGNAL: {symbol}",
+            "color": color,
+            "fields": [
+                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Time (ET)", "value": time_et, "inline": True},
+                {"name": "HTF Bias", "value": bias.upper(), "inline": True},
+                {"name": "Confidence", "value": f"{confidence}% [{label}]", "inline": True}
+            ],
+            "footer": {"text": "SMC Bot Strategy Execution"}
+        }]
+    }
+    
+    try:
+        requests.post(webhook_url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Failed to send Discord notification: {e}")
+
 # ================= STRATEGY =================
 
 def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     """
     Pure strategy function.
-    Takes historical dataframes and returns a signal ('buy', 'sell', or None).
+    Takes historical dataframes and returns a (signal, confidence) tuple.
     """
     # 1. HTF Direction
-    # Ensure we work on copies to avoid SettingWithCopy warnings on the original df if needed
     htf = htf.copy()
-    htf['ema50'] = ta.ema(htf['close'], length=50)
     
-    if len(htf) < 50: return None # Not enough data
+    # Only calculate EMA if it doesn't exist (prevents drift if already pre-calculated on full history)
+    if 'ema50' not in htf.columns:
+        if len(htf) < 50: return None, 0
+        htf['ema50'] = ta.ema(htf['close'], length=50)
     
-    # Check the LAST closed candle for bias
-    bias = "bullish" if htf['close'].iloc[-1] > htf['ema50'].iloc[-1] else "bearish"
+    if htf['ema50'].isnull().all():
+        return None, 0
+        
+    last_htf = htf.iloc[-1]
+    bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
     
     # 2. LTF Analysis
     ltf = ltf.copy()
-    # Add indicators
-    ltf = detect_fvg(ltf)
-    ltf = detect_order_block(ltf)
+    # Add indicators if not present
+    if 'bull_fvg' not in ltf.columns:
+        ltf = detect_fvg(ltf)
+    if 'is_bull_ob_candle' not in ltf.columns:
+        ltf = detect_order_block(ltf)
     
-    if len(ltf) < 5: return None
+    if len(ltf) < 5: return None, 0
     
     # Get last formed candle for signal check
     last_closed = ltf.iloc[-1]
     
     signal = None
+    confidence = 0
     
     if bias == "bullish":
         # Trigger: We just had a bullish impulse (OB creation)
@@ -341,7 +401,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         if last_closed['is_bear_ob_candle']:
              signal = "sell"
 
-    return signal
+    if signal:
+        confidence = calculate_confidence(last_closed, last_htf)
+
+    return signal, confidence
 
 async def generate_signal(symbol=None):
     if symbol is None:
@@ -349,16 +412,38 @@ async def generate_signal(symbol=None):
         
     try:
         # Fetch bars for both timeframes
-        htf_df = await get_bars(symbol, config.TIMEFRAME_HTF, 200)
-        ltf_df = await get_bars(symbol, config.TIMEFRAME_LTF, 200)
+        # Increase limit to accommodate 14 days of data for EMA stability
+        htf_df = await get_bars(symbol, config.TIMEFRAME_HTF, 2000)
+        ltf_df = await get_bars(symbol, config.TIMEFRAME_LTF, 5000)
         
         if htf_df.empty or ltf_df.empty:
             print(f"Not enough data fetched for {symbol}.")
-            return None
+            return None, 0
+
+        # --- INDICATOR STABILITY ---
+        # Calculate indicators on the FULL history before slicing
+        htf_df['ema50'] = ta.ema(htf_df['close'], length=50)
+        ltf_df = detect_fvg(ltf_df)
+        ltf_df = detect_order_block(ltf_df)
+
+        # --- CAUSAL PARITY FIX ---
+        # 1. LTF: Drop the last bar (incomplete forming candle)
+        # So ltf.iloc[-1] is the last fully CLOSED 1-minute candle.
+        ltf_df = ltf_df.iloc[:-1]
+        
+        # 2. HTF: Ensure bias is based on the last bar that CLOSED before the LTF candle.
+        # In Alpaca/IBKR 15Min start-indexed bars, the candle at 'T' closed at 'T + 15'.
+        # If last_ltf is at 11:14 AM, the 11:00 AM 15-min bar has NOT closed yet.
+        # The 10:45 AM bar is the last closed one.
+        last_ltf_ts = ltf_df['timestamp'].iloc[-1]
+        htf_df = htf_df[htf_df['timestamp'] <= (last_ltf_ts - timedelta(minutes=15))]
+        
+        if htf_df.empty or ltf_df.empty or len(htf_df) < 50:
+            return None, 0
 
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
-        return None
+        print(f"Error generating signal for {symbol}: {e}")
+        return None, 0
 
     return get_strategy_signal(htf_df, ltf_df)
 
@@ -542,8 +627,16 @@ async def cancel_all_orders_for_symbol(symbol):
             ibkr_mgr.ib.cancelOrder(t.order)
             print(f"Cancelled order for {symbol}")
 
-async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, stock_budget_override=None, option_budget_override=None):
+async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=5, stock_budget_override=None, option_budget_override=None):
     ib = ibkr_mgr.ib
+    
+    # Discord Notification for entry
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    time_et_str = now_et.strftime("%I:%M %p")
+    # Determine bias based on signal for the notification
+    # (Actually it's better to pass it in, but we can infer it: buy=BULLISH, sell=BEARISH)
+    bias = "BULLISH" if signal == "buy" else "BEARISH"
+    # send_discord_notification(signal, 0, time_et_str, symbol, bias, confidence) # Price 0 initially, updated in placement
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -1294,6 +1387,7 @@ async def main():
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
     parser.add_argument("--state-file", type=str, help="Custom path to the trade state JSON file")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
     
     global args
     args = parser.parse_args()
@@ -1310,6 +1404,15 @@ async def main():
     
     daily_cap = args.cap if args.cap is not None else 5
     
+    # Map confidence choices to numeric thresholds
+    CONF_THRESHOLDS = {
+        'all': 0,
+        'low': 20,
+        'medium': 50,
+        'high': 80
+    }
+    min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
+
     # Connect to IBKR
     connected = await ibkr_mgr.connect()
     if not connected:
@@ -1381,22 +1484,32 @@ async def main():
 
                 # 2. Market is open, look for signals
                 print(f"Analyzing {target_symbol} at {now_et}...")
-                sig = await generate_signal(target_symbol)
+                sig_res = await generate_signal(target_symbol)
                 
-                if sig:
-                    print(f"🚀 Signal detected: {sig.upper()}!({target_symbol})")
-                    use_cap = (daily_cap != -1)
-                    await place_trade(
-                        sig, 
-                        target_symbol, 
-                        use_daily_cap=use_cap, 
-                        daily_cap_value=daily_cap if use_cap else None,
-                        stock_budget_override=args.stock_budget,
-                        option_budget_override=args.option_budget
-                    )
-                    session.record_trade()
-                    print("Trade placed. Cooling down for 5 minutes...")
-                    await interruptible_sleep(300, session)
+                if sig_res:
+                    sig, confidence = sig_res if isinstance(sig_res, tuple) else (sig_res, 0)
+                    
+                    if sig:
+                        print(f"🚀 Signal detected: {sig.upper()}!({target_symbol}) | Confidence: {confidence}%")
+                        
+                        if confidence < min_conf_val:
+                            print(f"⚠️ Filtering signal due to low confidence ({confidence}% < {min_conf_val}%)")
+                            await interruptible_sleep(60, session)
+                            continue
+
+                        use_cap = (daily_cap != -1)
+                        await place_trade(
+                            sig,
+                            confidence,
+                            target_symbol, 
+                            use_daily_cap=use_cap, 
+                            daily_cap_value=daily_cap if use_cap else None,
+                            stock_budget_override=args.stock_budget,
+                            option_budget_override=args.option_budget
+                        )
+                        session.record_trade()
+                        print("Trade placed. Cooling down for 5 minutes...")
+                        await interruptible_sleep(300, session)
                 else:
                     await interruptible_sleep(60, session)
 
