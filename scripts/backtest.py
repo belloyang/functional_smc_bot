@@ -18,7 +18,11 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
+from app.bot import (
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
+    get_last_swing_low,
+)
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -81,17 +85,16 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print("No LTF data found.")
         return
 
-    # Ensure indices are handled
-    htf_data = htf_data.reset_index() 
+    # Build strategy features with the same helper used by app.bot.
+    htf_data = htf_data.reset_index()
     ltf_data = ltf_data.reset_index()
-    
-    # Set timestamp as index for easier slicing
-    htf_data.set_index('timestamp', inplace=True)
-    ltf_data.set_index('timestamp', inplace=True)
-    
-    # Sort just in case
-    htf_data.sort_index(inplace=True)
-    ltf_data.sort_index(inplace=True)
+    htf_data, ltf_data = precompute_strategy_features(htf_data, ltf_data)
+
+    # Use timestamp index for simulation loop mechanics.
+    htf_data = htf_data.set_index('timestamp').sort_index()
+    ltf_data = ltf_data.set_index('timestamp').sort_index()
+    htf_signal_data = htf_data.reset_index()
+    ltf_signal_data = ltf_data.reset_index()
     
     # Calculate Historical Volatility (for Options)
     # Annualized Volatility using daily logs of HTF (resampled to daily approx or rolling window)
@@ -142,9 +145,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
-        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:45 PM ET) ---
+        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
-        trade_window_end = current_time_et.replace(hour=15, minute=45, second=0, microsecond=0)
+        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
@@ -157,20 +160,25 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if current_time_utc < simulation_start_time:
             continue
             
-        # Get HTF data up to current_time (Causal: HTF bar must be CLOSED)
-        # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
+        # Mirror app.bot signal timing:
+        # evaluate on the last fully closed 1m candle, then execute on current bar.
+        if i < 1:
+            continue
+        eval_ts = ltf_data.index[i - 1]
+        res = get_causal_signal_from_precomputed(
+            htf_signal_data,
+            ltf_signal_data,
+            eval_ts
+        )
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+
+        # For option revaluation and diagnostics.
         htf_slice = htf_data[htf_data.index <= (current_time_utc - timedelta(minutes=15))]
         if len(htf_slice) < 50:
             continue
-            
         current_vol = htf_slice.iloc[-1]['volatility']
-        htf_slice = htf_slice.iloc[-200:] # Limit to last 200 HTF for speed
-        ltf_slice = ltf_data.iloc[max(0, i-200):i+1] # Pass last 200 LTF
-        
-        # Run Strategy
-        res = get_strategy_signal(htf_slice, ltf_slice)
-        signal, confidence = res if isinstance(res, tuple) else (res, 0)
-        
+        ltf_slice = ltf_data.iloc[max(0, i-200):i+1]
+
         price = current_bar['close']
         
         # --- RISK CHECKS (Before Signal) ---
