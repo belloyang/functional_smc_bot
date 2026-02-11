@@ -299,6 +299,59 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
 
     return signal, confidence
 
+
+def _normalize_timestamp_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a UTC `timestamp` column exists for stable causal slicing."""
+    out = df.copy()
+    if 'timestamp' not in out.columns:
+        out = out.reset_index()
+
+    out['timestamp'] = pd.to_datetime(out['timestamp'], utc=True, errors='coerce')
+    out = out.dropna(subset=['timestamp'])
+    out = out.sort_values('timestamp').reset_index(drop=True)
+    return out
+
+
+def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
+    """Compute strategy features once on full history to avoid signal drift."""
+    htf = _normalize_timestamp_frame(htf_df)
+    ltf = _normalize_timestamp_frame(ltf_df)
+
+    if 'ema50' not in htf.columns:
+        htf['ema50'] = ta.ema(htf['close'], length=50)
+
+    if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
+        ltf = detect_fvg(ltf)
+    if 'is_bull_ob_candle' not in ltf.columns or 'is_bear_ob_candle' not in ltf.columns:
+        ltf = detect_order_block(ltf)
+
+    return htf, ltf
+
+
+def get_causal_signal_from_precomputed(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, evaluation_ts, ltf_window: int = 200):
+    """
+    Evaluate signal at a specific closed 1m candle timestamp.
+    Uses only 15m candles that were already closed at that timestamp.
+    """
+    if evaluation_ts is None:
+        return None
+
+    ts = pd.Timestamp(evaluation_ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+
+    ltf_causal = ltf_df[ltf_df['timestamp'] <= ts]
+    if ltf_causal.empty:
+        return None
+
+    htf_causal = htf_df[htf_df['timestamp'] <= (ts - timedelta(minutes=15))]
+    if htf_causal.empty or len(htf_causal) < 50:
+        return None
+
+    return get_strategy_signal(htf_causal, ltf_causal.iloc[-ltf_window:])
+
 def generate_signal(symbol=None):
     if symbol is None:
         symbol = SYMBOL
@@ -318,28 +371,18 @@ def generate_signal(symbol=None):
             print("Not enough data fetched.")
             return None
 
-        # --- INDICATOR STABILITY ---
-        # Calculate indicators on the FULL history before slicing
-        htf['ema50'] = ta.ema(htf['close'], length=50)
-        ltf = detect_fvg(ltf)
-        ltf = detect_order_block(ltf)
+        htf, ltf = precompute_strategy_features(htf, ltf)
 
-        # --- CAUSAL PARITY FIX ---
-        # 1. LTF: Drop the last bar (incomplete forming candle)
-        ltf = ltf.iloc[:-1]
-        
-        # 2. HTF: Bias based on the last bar that CLOSED before the LTF candle.
-        last_ltf_ts = ltf['timestamp'].iloc[-1]
-        htf = htf[htf['timestamp'] <= (last_ltf_ts - timedelta(minutes=15))]
-        
-        if htf.empty or ltf.empty or len(htf) < 50:
+        # Last fully closed LTF bar: drop newest potentially-forming row.
+        if len(ltf) < 2:
             return None
+
+        evaluation_ts = ltf['timestamp'].iloc[-2]
+        return get_causal_signal_from_precomputed(htf, ltf, evaluation_ts)
 
     except Exception as e:
         print(f"Error generating signal for {symbol}: {e}")
         return None
-
-    return get_strategy_signal(htf, ltf)
 
 # ================= RISK =================
 

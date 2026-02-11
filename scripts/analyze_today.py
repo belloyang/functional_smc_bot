@@ -1,10 +1,7 @@
 import pandas as pd
-import numpy as np
-import pandas_ta as ta
 import sys
 import os
 import time
-import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,8 +10,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import (
-    get_strategy_signal, detect_fvg, detect_order_block,
-    calculate_confidence, get_confidence_label, send_discord_notification
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
+    get_confidence_label,
+    send_discord_notification
 )
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -52,39 +51,31 @@ def fetch_data(client, symbol, start_time, end_time):
 def process_bars(htf_df, ltf_df):
     """
     Pre-calculate all indicators on the full history to ensure stability.
+    Uses the same helper as app.bot to guarantee parity.
     """
-    htf = htf_df.reset_index()
-    ltf = ltf_df.reset_index()
-    htf.set_index('timestamp', inplace=True)
-    ltf.set_index('timestamp', inplace=True)
-    htf.sort_index(inplace=True)
-    ltf.sort_index(inplace=True)
-    
-    # Calculate indicators ONCE on the full history
-    htf['ema50'] = ta.ema(htf['close'], length=50)
-    
-    # LTF indicators
-    ltf = detect_fvg(ltf)
-    ltf = detect_order_block(ltf)
-    
-    return htf, ltf
+    return precompute_strategy_features(htf_df, ltf_df)
 
 def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
     """Checks if a signal exists at a specific timestamp and prints if new."""
-    # To avoid look-ahead bias, HTF bias must be based on the last bar that CLOSED before 'timestamp'.
-    # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
-    htf_causal = htf_data[htf_data.index <= (timestamp - timedelta(minutes=15))]
+    ts = pd.Timestamp(timestamp)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+
+    # Evaluate using the same causal helper as app.bot.
+    res = get_causal_signal_from_precomputed(htf_data, ltf_data, ts)
+    if not res:
+        return False
+
+    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
+    if signal_raw is None:
+        return False
+
+    # For logging only: compute causal HTF row for displayed bias.
+    htf_causal = htf_data[htf_data['timestamp'] <= (ts - timedelta(minutes=15))]
     if len(htf_causal) < 50:
         return False
-        
-    # Slicing the pre-processed dataframes is now safe because markers are already calculated.
-    ltf_slice = ltf_data[ltf_data.index <= timestamp].iloc[-200:]
-    
-    res = get_strategy_signal(htf_causal, ltf_slice)
-    if not res: return False
-    
-    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
-    if signal_raw is None: return False
     
     # Check Confidence Threshold
     if confidence < min_conf_val:
@@ -93,14 +84,14 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     signal = signal_raw.upper()
     
     # Avoid duplicate printing within 5 minutes of same signal
-    sig_id = f"{signal}_{timestamp.date()}"
+    sig_id = f"{signal}_{ts.date()}"
     last_sig_time = reported_signals.get(sig_id)
     
-    if last_sig_time and (timestamp - last_sig_time).total_seconds() < 300:
+    if last_sig_time and (ts - last_sig_time).total_seconds() < 300:
         return False
         
-    reported_signals[sig_id] = timestamp
-    time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
+    reported_signals[sig_id] = ts
+    time_et = ts.tz_convert(ET).strftime("%I:%M %p")
     
     label = get_confidence_label(confidence)
     last_htf = htf_causal.iloc[-1]
@@ -160,11 +151,11 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
     htf_processed, ltf_processed = process_bars(htf_raw, ltf_raw)
     
     # Perform Scan
-    scan_bars = ltf_processed[ltf_processed.index >= scan_start_utc]
+    scan_bars = ltf_processed[ltf_processed['timestamp'] >= scan_start_utc]
     
     signals_count = 0
-    for ts, row in scan_bars.iterrows():
-        if check_for_signal(ts, row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
+    for _, row in scan_bars.iterrows():
+        if check_for_signal(row['timestamp'], row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
             signals_count += 1
             
     if signals_count == 0:
@@ -196,9 +187,9 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
                 h_proc, l_proc = process_bars(h_live, l_live)
                 
                 # Check the last 3 bars just in case of slight polling delay
-                latest_bars = l_proc.iloc[-3:]
-                for ts, row in latest_bars.iterrows():
-                    check_for_signal(ts, row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
+                latest_bars = l_proc.tail(3)
+                for _, row in latest_bars.iterrows():
+                    check_for_signal(row['timestamp'], row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
                     
         except KeyboardInterrupt:
             print("\n🛑 Monitoring stopped by user.")
