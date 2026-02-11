@@ -30,7 +30,7 @@ def analyze_today_signals(symbol="SPY"):
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=5)  # Get a few days for context
+    start_time = end_time - timedelta(days=10)  # Standardized to 10 days for EMA50 stability
     
     # HTF Data (15 Min)
     print("Fetching HTF (15min) data...")
@@ -127,7 +127,7 @@ def analyze_today_signals(symbol="SPY"):
         
         # Detailed output
         print(f"\n⏰ Time: {check_time.strftime('%I:%M %p ET')}")
-        print(f"   SPY Price: ${last_ltf['close']:.2f}")
+        print(f"   {symbol} Price: ${last_ltf['close']:.2f}")
         print(f"   HTF Bias: {htf_bias} (Price: ${last_htf_close:.2f}, EMA50: ${last_htf_ema50:.2f})")
         
         # Check for order blocks in recent candles

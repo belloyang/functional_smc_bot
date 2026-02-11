@@ -70,7 +70,7 @@ async def get_bars(contract_or_symbol, timeframe, limit):
                 bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
                     contract,
                     endDateTime='',
-                    durationStr='1 D', # Try shorter duration for reliability
+                    durationStr='10 D', # Increased to 10D for EMA50 stability
                     barSizeSetting=bar_size,
                     whatToShow=wts,
                     useRTH=False,
