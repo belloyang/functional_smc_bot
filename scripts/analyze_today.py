@@ -50,7 +50,9 @@ def fetch_data(client, symbol, start_time, end_time):
     return None, None, None
 
 def process_bars(htf_df, ltf_df):
-    """Pre-calculate indicators on dataframes."""
+    """
+    Pre-calculate all indicators on the full history to ensure stability.
+    """
     htf = htf_df.reset_index()
     ltf = ltf_df.reset_index()
     htf.set_index('timestamp', inplace=True)
@@ -58,11 +60,13 @@ def process_bars(htf_df, ltf_df):
     htf.sort_index(inplace=True)
     ltf.sort_index(inplace=True)
     
+    # Calculate indicators ONCE on the full history
     htf['ema50'] = ta.ema(htf['close'], length=50)
     
-    # Calculate rolling stats (already done in bot.detect_order_block, but ensures consistency)
+    # LTF indicators
     ltf = detect_fvg(ltf)
     ltf = detect_order_block(ltf)
+    
     return htf, ltf
 
 def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
@@ -73,9 +77,7 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     if len(htf_causal) < 50:
         return False
         
-    # We also need a slice of LTF data ending at THIS row for indicator context if needed.
-    # However, row itself has OB/FVG pre-calculated.
-    # We can create a 1-row LTF slice for compatibility with get_strategy_signal.
+    # Slicing the pre-processed dataframes is now safe because markers are already calculated.
     ltf_slice = ltf_data[ltf_data.index <= timestamp].iloc[-200:]
     
     res = get_strategy_signal(htf_causal, ltf_slice)
@@ -148,7 +150,7 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
     print(f"Fetching data and scanning established signals since market open...")
     
     end_time_utc = datetime.now(timezone.utc)
-    lookback_start_utc = end_time_utc - timedelta(days=7) # Enough history for EMA50 (needs 50 bars)
+    lookback_start_utc = end_time_utc - timedelta(days=14) # 14 days for stable EMA50
     
     htf_raw, ltf_raw, feed = fetch_data(client, symbol, lookback_start_utc, end_time_utc)
     if htf_raw is None:

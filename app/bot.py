@@ -13,7 +13,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce, PositionSide, OrderStatus, QueryOrderStatus
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, StopLossRequest, TakeProfitRequest, ReplaceOrderRequest
 try:
     from . import config
 except ImportError:
@@ -42,23 +42,24 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 def get_bars(symbol, timeframe, limit):
-    # Calculate a lookback to ensure we have enough data (e.g. 5 days)
+    # Calculate a lookback to ensure we have enough data (e.g. 14 days)
     # This prevents the API from defaulting to "today only" which breaks indicators like EMA50
-    start_dt = datetime.now() - timedelta(days=5)
+    # 14 days is safer for EMA50 stability.
+    start_dt = datetime.now() - timedelta(days=14)
     
-    # Request a large chunk of data starting from 5 days ago to ensure we capture the most recent data
-    # limit=10000 is typically sufficient for 1Min bars over 5 days (~2000 bars)
+    # Request a large chunk of data starting from 14 days ago.
+    # We increase the limit to ensure we don't truncate history needed for warm-up.
     req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, limit=10000, start=start_dt)
     bars = data_client.get_stock_bars(req).df
     bars = bars.reset_index()
     
     if bars.empty:
-        print("Bars df is empty!")
+        print(f"Bars df for {symbol} is empty!")
         return bars
 
-    # Slice the dataframe to return only the requested 'limit' of MOST RECENT bars
-    if len(bars) > limit:
-        bars = bars.iloc[-limit:]
+    # To be extremely consistent, we do NOT slice here anymore.
+    # The strategy functions (get_strategy_signal) will handle looking at the 'last' bars.
+    # Slicing here can break indicators if the limit is small.
         
     return bars
 
@@ -254,22 +255,27 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     Takes historical dataframes and returns a signal ('buy', 'sell', or None).
     """
     # 1. HTF Direction
-    # Ensure we work on copies to avoid SettingWithCopy warnings on the original df if needed
     htf = htf.copy()
-    htf['ema50'] = ta.ema(htf['close'], length=50)
     
-    if len(htf) < 50: return None # Not enough data
+    # Only calculate EMA if it doesn't exist (prevents drift if already pre-calculated on full history)
+    if 'ema50' not in htf.columns:
+        if len(htf) < 50: return None
+        htf['ema50'] = ta.ema(htf['close'], length=50)
     
+    if htf['ema50'].isnull().all():
+        return None
+        
     # Check the LAST closed candle for bias. 
-    # To be strictly causal, we use iloc[-1] assuming the caller has removed any incomplete bars.
     last_htf = htf.iloc[-1]
     bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
     
     # 2. LTF Analysis
     ltf = ltf.copy()
-    # Add indicators
-    ltf = detect_fvg(ltf)
-    ltf = detect_order_block(ltf)
+    # Add indicators if not present
+    if 'bull_fvg' not in ltf.columns:
+        ltf = detect_fvg(ltf)
+    if 'is_bull_ob_candle' not in ltf.columns:
+        ltf = detect_order_block(ltf)
     
     if len(ltf) < 5: return None
     
@@ -964,29 +970,41 @@ def manage_trade_updates(target_symbol=None):
                 
                 continue
             
-            # --- STEPPED TRAILING STOP LOGIC ---
-            # 1. Break Even if Profit > 10%
-            # 2. Lock 10% if Profit > 20%
-            # 3. Lock 20% if Profit > 30%
+            # --- STEPPED TRAILING STOP LOGIC (STOCKS) ---
+            # 1. Fetch current stop-loss order if it exists
+            stop_order = None
+            current_stop = 0.0
+            try:
+                orders = trade_client.get_orders(GetOrdersRequest(status=OrderStatus.OPEN, symbol=symbol))
+                for o in orders:
+                    if o.type == 'stop' or o.type == 'stop_limit':
+                        stop_order = o
+                        current_stop = float(o.stop_price)
+                        break
+            except Exception as e:
+                print(f"DEBUG: Could not fetch stop order for {symbol}: {e}")
+
+            if not stop_order:
+                continue
+
+            # 2. Stepped Trailing Update
+            # Break Even if Profit > 10%
+            # Lock 10% if Profit > 20%
+            # Lock 20% if Profit > 30%
             # ... and so on (Step 10%)
             
             STEP_SIZE = 0.10
+            new_stop = None
             
             if pl_pct >= STEP_SIZE:
                 # Calculate the milestone we have passed
-                # e.g. 0.25 -> floor(2.5) = 2 -> 2 * 0.10 = 0.20 milestone
-                # But we lock (Milestone - 0.10)
-                # 0.25 -> Milestone 0.20 -> Lock 0.10
-                # 0.15 -> Milestone 0.10 -> Lock 0.00 (BE)
-                
                 milestone = int(pl_pct * 10) / 10.0
                 lock_pct = milestone - 0.10
                 
                 target_stop = entry_price * (1 + lock_pct)
                 
-                # Only update if the new target is higher than current stop
-                # (and ensure we don't accidentally lower a manual stop if user set one higher, avoiding churn)
-                if target_stop > current_stop:
+                # Only update if the new target is meaningfully higher than current stop
+                if target_stop > current_stop + 0.01:
                     new_stop = target_stop
                     if lock_pct <= 0.001: 
                          print(f"🛡️ BREAK EVEN: {symbol} is up {pl_pct*100:.1f}%. Moving SL to Entry {new_stop:.2f}")
