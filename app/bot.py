@@ -318,8 +318,25 @@ def generate_signal(symbol=None):
             print("Not enough data fetched.")
             return None
 
+        # --- INDICATOR STABILITY ---
+        # Calculate indicators on the FULL history before slicing
+        htf['ema50'] = ta.ema(htf['close'], length=50)
+        ltf = detect_fvg(ltf)
+        ltf = detect_order_block(ltf)
+
+        # --- CAUSAL PARITY FIX ---
+        # 1. LTF: Drop the last bar (incomplete forming candle)
+        ltf = ltf.iloc[:-1]
+        
+        # 2. HTF: Bias based on the last bar that CLOSED before the LTF candle.
+        last_ltf_ts = ltf['timestamp'].iloc[-1]
+        htf = htf[htf['timestamp'] <= (last_ltf_ts - timedelta(minutes=15))]
+        
+        if htf.empty or ltf.empty or len(htf) < 50:
+            return None
+
     except Exception as e:
-        print("Error fetching data:", e)
+        print(f"Error generating signal for {symbol}: {e}")
         return None
 
     return get_strategy_signal(htf, ltf)
