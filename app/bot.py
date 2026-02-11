@@ -11,6 +11,10 @@ import argparse
 import time
 import asyncio
 from ib_insync import *
+from alpaca.data.historical import StockHistoricalDataClient, OptionHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest, OptionLatestQuoteRequest
+# Setup ib_insync utility loop for async environments
+util.patchAsyncio() 
 try:
     from . import config
     from .ibkr_manager import ibkr_mgr
@@ -49,18 +53,54 @@ async def get_bars(contract_or_symbol, timeframe, limit):
         symbol = contract_or_symbol
         contract = Stock(symbol, 'SMART', 'USD')
     
-    # Using reqHistoricalDataAsync for non-blocking fetch
-    # Using 'MIDPOINT' which is often available without a full subscription
-    bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
-        contract,
-        endDateTime='',
-        durationStr='1 W',
-        barSizeSetting=bar_size,
-        whatToShow='MIDPOINT',
-        useRTH=False,
-        formatDate=1,
-        keepUpToDate=False
-    )
+    # Sequential Fallback for Market Data Types (To bypass subscription requirements)
+    # Options often return 'no data' for MIDPOINT at SMART if looking for high-resolution historical.
+    # We try SMART first, then specific major exchanges if it fails.
+    what_to_show_options = ['MIDPOINT', 'TRADES', 'BID', 'ASK']
+    exchanges = ['SMART', 'CBOE', 'PHLX', 'ARCA']
+    bars = None
+    
+    for wts in what_to_show_options:
+        for exch in exchanges:
+            try:
+                if exch != 'SMART':
+                    contract.exchange = exch
+                
+                # print(f"DEBUG: Requesting {wts} for {contract.localSymbol} at {exch}...")
+                bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime='',
+                    durationStr='1 D', # Try shorter duration for reliability
+                    barSizeSetting=bar_size,
+                    whatToShow=wts,
+                    useRTH=False,
+                    formatDate=1,
+                    keepUpToDate=False
+                )
+                if bars:
+                    # print(f"✅ Successfully fetched {wts} for {symbol} at {exch}")
+                    # Revert to SMART if we changed it
+                    contract.exchange = 'SMART'
+                    break
+            except Exception:
+                continue
+        if bars: break
+    
+    if not bars:
+        # Final attempt: try a larger bar size just to get ANY price
+        # print(f"DEBUG: Final fallback for {symbol}: 1 Day bars...")
+        try:
+            bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime='',
+                durationStr='10 D',
+                barSizeSetting='1 day',
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False
+            )
+        except Exception: pass
     
     if not bars:
         print(f"No bars returned for {symbol}")
@@ -80,10 +120,73 @@ async def get_latest_price_fallback(contract_or_symbol):
     Fetches the latest close price from historical data if real-time ticker fails.
     """
     try:
-        # Use 1Min bars as most granular fallback
+        # 1. Try a quick ticker update wait first (if it's a contract)
+        if isinstance(contract_or_symbol, Contract):
+            ibkr_mgr.ib.reqMktData(contract_or_symbol)
+            # Wait up to 5s specifically for ticker update
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                ticker = ibkr_mgr.ib.ticker(contract_or_symbol)
+                if ticker and ticker.marketPrice() > 0 and not np.isnan(ticker.marketPrice()):
+                    return float(ticker.marketPrice())
+
+        # 2. Try Historical Bars (1Min)
         df = await get_bars(contract_or_symbol, "1Min", 1)
         if not df.empty:
             return float(df['close'].iloc[-1])
+            
+        # 3. Try Historical Bars (1Day) as ultimate IBKR fallback
+        df_day = await get_bars(contract_or_symbol, "1Day", 1)
+        if not df_day.empty:
+            return float(df_day['close'].iloc[-1])
+            
+        # 4. Try Alpaca Fallback (Last Resort)
+        try:
+            # Note: We need to parse the IBKR contract/symbol into Alpaca's format
+            if isinstance(contract_or_symbol, Option):
+                # Format: SPY260320C00561000
+                symbol = contract_or_symbol.symbol
+                # lastTradeDateOrContractMonth is YYYYMMDD. Alpaca needs YYMMDD.
+                raw_exp = contract_or_symbol.lastTradeDateOrContractMonth
+                expiry = raw_exp[2:] # YYMMDD if YYYYMMDD
+                right = contract_or_symbol.right
+                # OCC format for Alpaca: [SYM][YYMMDD][C/P][STRIKE (8 digits, 3 decimal implied)]
+                strike_val = int(round(contract_or_symbol.strike * 1000))
+                strike_str = f"{strike_val:08d}"
+                alp_occ = f"{symbol}{expiry}{right}{strike_str}"
+                
+                # print(f"DEBUG: Alpaca OCC Construction -> symbol='{symbol}', exp='{expiry}', right='{right}', strike='{strike_str}'")
+                print(f"ℹ️ IBKR failed. Using Alpaca fallback for {alp_occ}...")
+                data_client = OptionHistoricalDataClient(config.API_KEY, config.API_SECRET)
+                latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ))
+                if latest_quote and alp_occ in latest_quote:
+                    q = latest_quote[alp_occ]
+                    if q.ask_price > 0 and q.bid_price > 0:
+                        return float((q.ask_price + q.bid_price) / 2)
+                    elif q.ask_price > 0:
+                        return float(q.ask_price)
+                    elif hasattr(q, 'last_price') and q.last_price > 0:
+                        return float(q.last_price)
+                
+                # Try padded format if compact failed (some older clients might need it)
+                alp_occ_padded = f"{symbol.ljust(6)}{expiry}{right}{strike_str}"
+                # print(f"ℹ️ Trying padded Alpaca format: {alp_occ_padded}...")
+                latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ_padded))
+                if latest_quote and alp_occ_padded in latest_quote:
+                    q = latest_quote[alp_occ_padded]
+                    if q.ask_price > 0: return float(q.ask_price)
+            else:
+                symbol = contract_or_symbol.symbol if isinstance(contract_or_symbol, Contract) else contract_or_symbol
+                print(f"ℹ️ IBKR failed. Using Alpaca fallback for {symbol}...")
+                data_client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+                latest_quote = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbol))
+                if latest_quote and symbol in latest_quote:
+                    q = latest_quote[symbol]
+                    price = (q.ask_price + q.bid_price) / 2 if q.ask_price > 0 and q.bid_price > 0 else q.ask_price
+                    if price > 0: return float(price)
+        except Exception as alp_e:
+            print(f"Alpaca fallback failed: {alp_e}")
+            
     except Exception as e:
         sym = contract_or_symbol.symbol if isinstance(contract_or_symbol, Contract) else contract_or_symbol
         print(f"Error in price fallback for {sym}: {e}")
@@ -368,19 +471,27 @@ async def get_best_option_contract(symbol, signal_type, known_price=None):
         # Pick SMART exchange chain
         chain = next((c for c in chains if c.exchange == 'SMART'), chains[0])
         
-        # 4. Filter Expiries (3-14 days out)
+        # 4. Filter Expiries (3-30 days out)
         now = datetime.now()
         valid_expiries = []
+        # Support both YYYYMMDD and YYYY-MM-DD if they ever appear
         for exp in chain.expirations:
-            dt_exp = datetime.strptime(exp, "%Y%m%d")
-            days_to_expiry = (dt_exp - now).days
-            if 3 <= days_to_expiry <= 14:
-                valid_expiries.append(exp)
+            try:
+                clean_exp = exp.replace('-', '')
+                dt_exp = datetime.strptime(clean_exp, "%Y%m%d")
+                days_to_expiry = (dt_exp - now).days
+                if 1 <= days_to_expiry <= 14: # Much tighter and closer to now
+                    valid_expiries.append(exp)
+            except Exception: continue
         
         if not valid_expiries:
-            # Fallback: pick the first available expiry if none in range
-            print("⚠️ No expiries in 3-14 day range. Using first available.")
-            valid_expiries = chain.expirations[:1]
+            # Fallback: pick the one closest to 5 days
+            print("⚠️ No expiries in ideal range. Searching closest...")
+            try:
+                sorted_exp = sorted(chain.expirations, key=lambda x: abs((datetime.strptime(x.replace('-', ''), "%Y%m%d") - now).days - 5))
+                valid_expiries = sorted_exp[:1]
+            except Exception:
+                valid_expiries = chain.expirations[:1]
             
         target_expiry = valid_expiries[0]
         
@@ -556,23 +667,22 @@ async def place_trade(signal, symbol, use_daily_cap=True, daily_cap_value=5, sto
             try:
                 # Fetch Current Option Price (Tick)
                 ib.reqMktData(opt_contract)
-                await asyncio.sleep(0.5) # Wait for tick
-                ticker = ib.ticker(opt_contract)
-                
-                if not ticker:
-                    print(f"❌ Ticker not found for {opt_contract.localSymbol}. Skipping.")
-                    return
+                # Wait for ticker (Delayed data can take 2-5s to arrive initially)
+                entry_est = None
+                for _ in range(10): # Max 5 seconds
+                    await asyncio.sleep(0.5)
+                    ticker = ib.ticker(opt_contract)
+                    if ticker:
+                        entry_est = ticker.ask if ticker.ask > 0 else ticker.last
+                        if not entry_est or entry_est <= 0 or np.isnan(entry_est):
+                             entry_est = ticker.marketPrice()
                     
-                entry_est = ticker.ask if ticker.ask > 0 else ticker.last
-                
-                if not entry_est or entry_est <= 0 or np.isnan(entry_est):
-                    # For options, MIDPOINT historical data via get_bars might not work without subscription
-                    # but we try ticker.marketPrice() as a last resort
-                    entry_est = ticker.marketPrice()
+                    if entry_est and entry_est > 0 and not np.isnan(entry_est):
+                        break
                 
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     # --- NEW FALLBACK: Historical Midpoint ---
-                    print(f"ℹ️ Attempting historical MIDPOINT fallback for {opt_contract.localSymbol}...")
+                    print(f"ℹ️ Attempting historical fallback for {opt_contract.localSymbol}...")
                     entry_est = await get_latest_price_fallback(opt_contract)
 
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):

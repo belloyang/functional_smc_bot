@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import os
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to sys.path
@@ -37,6 +38,7 @@ async def test_option_pricing():
     [underlying] = await ib.qualifyContractsAsync(underlying)
     
     # Get chain details (minimal)
+    # Using empty exchange string '' to get all listings
     chains = await ib.reqSecDefOptParamsAsync(underlying.symbol, '', underlying.secType, underlying.conId)
     if not chains:
         print("No option chains found. Ensure you have some market data connection.")
@@ -44,8 +46,21 @@ async def test_option_pricing():
         return
         
     chain = next(c for c in chains if c.exchange == 'SMART')
-    expiry = chain.expirations[0]
-    strike = chain.strikes[len(chain.strikes)//2] # Middle strike
+    print(f"DEBUG: All expirations: {chain.expirations[:10]}...")
+    
+    # Pick a more liquid near-term expiry (3-7 days)
+    now = datetime.now()
+    valid_expiries = []
+    for exp in chain.expirations:
+        dt_exp = datetime.strptime(exp, "%Y%m%d")
+        days_to_expiry = (dt_exp - now).days
+        if 2 <= days_to_expiry <= 10:
+            valid_expiries.append(exp)
+    
+    expiry = valid_expiries[0] if valid_expiries else chain.expirations[0]
+    # Pick strike closest to $500 or half-way
+    target_price = await get_latest_price_fallback('SPY') or 500.0
+    strike = sorted(chain.strikes, key=lambda x: abs(x - target_price))[0]
     
     contract = Option(symbol, expiry, strike, right, 'SMART')
     [contract] = await ib.qualifyContractsAsync(contract)

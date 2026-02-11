@@ -7,7 +7,7 @@ except ImportError:
     import config
 
 # Setup ib_insync utility loop for async environments
-# util.patchAsyncio() 
+util.patchAsyncio() 
 
 class IBKRManager:
     _instance = None
@@ -40,9 +40,11 @@ class IBKRManager:
                 config.IBKR_PORT, 
                 clientId=config.IBKR_CLIENT_ID
             )
-            self._ib.reqMarketDataType(3)  # Use delayed data if live is not available
-            self._ib.reqMarketDataType(4)  # Use delayed frozen if delayed is not available
-            print("Successfully connected to IBKR (using Delayed/Frozen Market Data).")
+            self._ib.reqMarketDataType(1)  # Live (default)
+            self._ib.reqMarketDataType(2)  # Frozen (at market close)
+            self._ib.reqMarketDataType(3)  # Delayed (delayed by 15-20 min)
+            self._ib.reqMarketDataType(4)  # Delayed Frozen
+            print("Successfully connected to IBKR (using Multi-Mode Market Data).")
             return True
         except Exception as e:
             print(f"Failed to connect to IBKR: {e}")
