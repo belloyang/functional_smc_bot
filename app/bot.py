@@ -217,7 +217,7 @@ def send_discord_notification(signal, price, time_str, symbol, bias, confidence)
     
     payload = {
         "embeds": [{
-            "title": f"🚀 {signal.upper()} Signal Dispatched!",
+            "title": f"🚀 [{symbol}] {signal.upper()} Signal Detected!",
             "color": color,
             "fields": [
                 {"name": "Symbol", "value": f"**{symbol}**", "inline": True},
