@@ -140,6 +140,23 @@ async def get_latest_price_fallback(contract_or_symbol):
         df_day = await get_bars(contract_or_symbol, "1Day", 1)
         if not df_day.empty:
             return float(df_day['close'].iloc[-1])
+        
+        # 3.5 Try 'TRADES' for Options (Sometimes MIDPOINT is restricted)
+        if isinstance(contract_or_symbol, Option):
+            try:
+                # Use a small window 1-min TRADES history
+                bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
+                    contract_or_symbol,
+                    endDateTime='',
+                    durationStr='1 D',
+                    barSizeSetting='1 min',
+                    whatToShow='TRADES',
+                    useRTH=False,
+                    formatDate=1
+                )
+                if bars:
+                    return float(bars[-1].close)
+            except Exception: pass
             
         # 4. Try Alpaca Fallback (Last Resort)
         try:
@@ -156,8 +173,7 @@ async def get_latest_price_fallback(contract_or_symbol):
                 strike_str = f"{strike_val:08d}"
                 alp_occ = f"{symbol}{expiry}{right}{strike_str}"
                 
-                # print(f"DEBUG: Alpaca OCC Construction -> symbol='{symbol}', exp='{expiry}', right='{right}', strike='{strike_str}'")
-                print(f"ℹ️ IBKR failed. Using Alpaca fallback for {alp_occ}...")
+                print(f"ℹ️ IBKR failed for {contract_or_symbol.localSymbol}. Using Alpaca fallback for {alp_occ}...")
                 data_client = OptionHistoricalDataClient(config.API_KEY, config.API_SECRET)
                 
                 # Try COMPACT format first
@@ -558,25 +574,35 @@ async def get_best_option_contract(symbol, signal_type, known_price=None):
             print(f"❌ No option chains found for {symbol}")
             return None
         
-        # Pick SMART exchange chain
-        chain = next((c for c in chains if c.exchange == 'SMART'), chains[0])
+        # Filter chains: prefer those where tradingClass matches the symbol (Standard Options)
+        # Some symbols have '2QQQ' or other classes for weeklies/non-standard variants.
+        standard_chains = [c for c in chains if c.tradingClass == symbol and c.exchange == 'SMART']
+        if not standard_chains:
+            standard_chains = [c for c in chains if c.exchange == 'SMART']
         
-        # 4. Filter Expiries (3-30 days out)
+        if not standard_chains:
+            chain = chains[0]
+        else:
+            # Pick the chain with the most strikes (likely the main one)
+            chain = max(standard_chains, key=lambda c: len(c.strikes))
+        
+        print(f"ℹ️ Selected Chain: exchange={chain.exchange}, tradingClass={chain.tradingClass}, mult={chain.multiplier}")
+
+        # 4. Filter Expiries (1-14 days out)
         now = datetime.now()
         valid_expiries = []
-        # Support both YYYYMMDD and YYYY-MM-DD if they ever appear
         for exp in chain.expirations:
             try:
                 clean_exp = exp.replace('-', '')
                 dt_exp = datetime.strptime(clean_exp, "%Y%m%d")
                 days_to_expiry = (dt_exp - now).days
-                if 1 <= days_to_expiry <= 14: # Much tighter and closer to now
+                if 1 <= days_to_expiry <= 14:
                     valid_expiries.append(exp)
             except Exception: continue
         
         if not valid_expiries:
             # Fallback: pick the one closest to 5 days
-            print("⚠️ No expiries in ideal range. Searching closest...")
+            print("⚠️ No expiries in ideal 1-14d range. Searching closest...")
             try:
                 sorted_exp = sorted(chain.expirations, key=lambda x: abs((datetime.strptime(x.replace('-', ''), "%Y%m%d") - now).days - 5))
                 valid_expiries = sorted_exp[:1]
@@ -586,21 +612,27 @@ async def get_best_option_contract(symbol, signal_type, known_price=None):
         target_expiry = valid_expiries[0]
         
         # 5. Pick ATM Strike
+        # Ensure current_price is valid
+        if not current_price or current_price <= 0:
+            print(f"❌ Cannot determine ATM strike for {symbol} without valid price ({current_price})")
+            return None
+
         target_strike = sorted(chain.strikes, key=lambda x: abs(x - current_price))[0]
         right = 'C' if signal_type == "buy" else 'P'
         
-        print(f"🎯 Selected Option Setup: {symbol} {target_expiry} ${target_strike} {right}")
+        print(f"🎯 Selected Option Setup: {symbol} {target_expiry} ${target_strike} {right} (Class: {chain.tradingClass})")
 
         # 6. Create and Qualify Contract
         contract = Option(symbol, target_expiry, target_strike, right, 'SMART')
+        contract.tradingClass = chain.tradingClass # Lock the trading class
         qualified = await ib.qualifyContractsAsync(contract)
         
         if not qualified:
-            print(f"❌ Failed to qualify option contract: {contract.localSymbol}")
+            print(f"❌ Failed to qualify option contract: {contract.symbol} {target_expiry} {target_strike}")
             return None
             
         res_contract = qualified[0]
-        # Force exchange to 'SMART' to prevent Error 321 if it comes back empty
+        # Ensure SMART, but preserve the qualified conId and tradingClass
         res_contract.exchange = 'SMART'
         
         return res_contract
