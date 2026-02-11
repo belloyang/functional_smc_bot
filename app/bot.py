@@ -158,23 +158,27 @@ async def get_latest_price_fallback(contract_or_symbol):
                 # print(f"DEBUG: Alpaca OCC Construction -> symbol='{symbol}', exp='{expiry}', right='{right}', strike='{strike_str}'")
                 print(f"ℹ️ IBKR failed. Using Alpaca fallback for {alp_occ}...")
                 data_client = OptionHistoricalDataClient(config.API_KEY, config.API_SECRET)
-                latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ))
-                if latest_quote and alp_occ in latest_quote:
-                    q = latest_quote[alp_occ]
-                    if q.ask_price > 0 and q.bid_price > 0:
-                        return float((q.ask_price + q.bid_price) / 2)
-                    elif q.ask_price > 0:
-                        return float(q.ask_price)
-                    elif hasattr(q, 'last_price') and q.last_price > 0:
-                        return float(q.last_price)
                 
-                # Try padded format if compact failed (some older clients might need it)
-                alp_occ_padded = f"{symbol.ljust(6)}{expiry}{right}{strike_str}"
-                # print(f"ℹ️ Trying padded Alpaca format: {alp_occ_padded}...")
-                latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ_padded))
-                if latest_quote and alp_occ_padded in latest_quote:
-                    q = latest_quote[alp_occ_padded]
-                    if q.ask_price > 0: return float(q.ask_price)
+                # Try COMPACT format first
+                try:
+                    latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ))
+                    if latest_quote and alp_occ in latest_quote:
+                        q = latest_quote[alp_occ]
+                        if q.ask_price > 0: return float(q.ask_price)
+                except Exception as e1:
+                    # print(f"Alpaca compact format failed: {e1}")
+                    pass
+                
+                # Try padded format
+                try:
+                    alp_occ_padded = f"{symbol.ljust(6)}{expiry}{right}{strike_str}"
+                    latest_quote = data_client.get_option_latest_quote(OptionLatestQuoteRequest(symbol_or_symbols=alp_occ_padded))
+                    if latest_quote and alp_occ_padded in latest_quote:
+                        q = latest_quote[alp_occ_padded]
+                        if q.ask_price > 0: return float(q.ask_price)
+                except Exception as e2:
+                    # print(f"Alpaca padded format failed: {e2}")
+                    pass
             else:
                 symbol = contract_or_symbol.symbol if isinstance(contract_or_symbol, Contract) else contract_or_symbol
                 print(f"ℹ️ IBKR failed. Using Alpaca fallback for {symbol}...")
