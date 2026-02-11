@@ -13,6 +13,7 @@ import asyncio
 from ib_insync import *
 from alpaca.data.historical import StockHistoricalDataClient, OptionHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest, OptionLatestQuoteRequest
+import requests
 # Setup ib_insync utility loop for async environments
 util.patchAsyncio() 
 try:
@@ -70,7 +71,7 @@ async def get_bars(contract_or_symbol, timeframe, limit):
                 bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
                     contract,
                     endDateTime='',
-                    durationStr='10 D', # Increased to 10D for EMA50 stability
+                    durationStr='14 D', # Match analyze_today.py for EMA50 stability
                     barSizeSetting=bar_size,
                     whatToShow=wts,
                     useRTH=False,
@@ -93,7 +94,7 @@ async def get_bars(contract_or_symbol, timeframe, limit):
             bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime='',
-                durationStr='10 D',
+                durationStr='14 D',
                 barSizeSetting='1 day',
                 whatToShow='MIDPOINT',
                 useRTH=False,
@@ -636,7 +637,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     # Determine bias based on signal for the notification
     # (Actually it's better to pass it in, but we can infer it: buy=BULLISH, sell=BEARISH)
     bias = "BULLISH" if signal == "buy" else "BEARISH"
-    # send_discord_notification(signal, 0, time_et_str, symbol, bias, confidence) # Price 0 initially, updated in placement
+    # send_discord_notification(signal, 0, time_et_str, symbol, bias, confidence) # Moved below after price check
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -691,6 +692,9 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
             any_options_held = True
 
     print(f"DEBUG: Current Position for {symbol}: {qty_held} units (Side: {side_held}) | Options: {any_options_held}")
+
+    # Discord Notification with final price
+    send_discord_notification(signal, price, time_et_str, symbol, bias, confidence)
 
     # 2. Global Position Cleanup (Cross-Asset Signal Flip)
     same_bias_held = False

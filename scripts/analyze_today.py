@@ -3,186 +3,214 @@ import numpy as np
 import pandas_ta as ta
 import sys
 import os
+import time
+import requests
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # Add root directory to path to allow imports from app
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import get_strategy_signal, detect_fvg, detect_order_block
+from app.bot import (
+    get_strategy_signal, detect_fvg, detect_order_block,
+    calculate_confidence, get_confidence_label, send_discord_notification
+)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
-def analyze_today_signals(symbol="SPY"):
+def fetch_data(client, symbol, start_time, end_time):
+    """Utility to fetch HTF and LTF data with feed fallback."""
+    feeds = ["sip", "iex"]
+    for feed in feeds:
+        try:
+            htf_req = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+                start=start_time,
+                end=end_time,
+                feed=feed
+            )
+            htf_data = client.get_stock_bars(htf_req).df
+            
+            ltf_req = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=start_time,
+                end=end_time,
+                feed=feed
+            )
+            ltf_data = client.get_stock_bars(ltf_req).df
+            
+            if not htf_data.empty and not ltf_data.empty:
+                return htf_data, ltf_data, feed
+        except Exception:
+            continue
+    return None, None, None
+
+def process_bars(htf_df, ltf_df):
     """
-    Detailed analysis of signal conditions for today's trading session.
+    Pre-calculate all indicators on the full history to ensure stability.
     """
+    htf = htf_df.reset_index()
+    ltf = ltf_df.reset_index()
+    htf.set_index('timestamp', inplace=True)
+    ltf.set_index('timestamp', inplace=True)
+    htf.sort_index(inplace=True)
+    ltf.sort_index(inplace=True)
+    
+    # Calculate indicators ONCE on the full history
+    htf['ema50'] = ta.ema(htf['close'], length=50)
+    
+    # LTF indicators
+    ltf = detect_fvg(ltf)
+    ltf = detect_order_block(ltf)
+    
+    return htf, ltf
+
+def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
+    """Checks if a signal exists at a specific timestamp and prints if new."""
+    # To avoid look-ahead bias, HTF bias must be based on the last bar that CLOSED before 'timestamp'.
+    # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
+    htf_causal = htf_data[htf_data.index <= (timestamp - timedelta(minutes=15))]
+    if len(htf_causal) < 50:
+        return False
+        
+    # Slicing the pre-processed dataframes is now safe because markers are already calculated.
+    ltf_slice = ltf_data[ltf_data.index <= timestamp].iloc[-200:]
+    
+    res = get_strategy_signal(htf_causal, ltf_slice)
+    if not res: return False
+    
+    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
+    if signal_raw is None: return False
+    
+    # Check Confidence Threshold
+    if confidence < min_conf_val:
+        return False
+        
+    signal = signal_raw.upper()
+    
+    # Avoid duplicate printing within 5 minutes of same signal
+    sig_id = f"{signal}_{timestamp.date()}"
+    last_sig_time = reported_signals.get(sig_id)
+    
+    if last_sig_time and (timestamp - last_sig_time).total_seconds() < 300:
+        return False
+        
+    reported_signals[sig_id] = timestamp
+    time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
+    
+    label = get_confidence_label(confidence)
+    last_htf = htf_causal.iloc[-1]
+    bias = "BULLISH" if last_htf['close'] > last_htf['ema50'] else "BEARISH"
+    
+    print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
+    print(f"   Price: ${ltf_row['close']:.2f}")
+    print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
+    print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
+    print("-" * 40)
+    
+    if is_live:
+        send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
+        
+    return True
+
+def analyze_today_signals(symbol="SPY", min_conf_str="all"):
     ET = ZoneInfo("US/Eastern")
-    today = datetime.now(ET)
-    today_str = today.strftime("%Y-%m-%d")
-    
-    print(f"Analyzing {symbol} signal conditions for today ({today_str})...")
-    print("="*80)
-    
-    # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+    reported_signals = {} # To track and dedup signals
     
-    end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=10)  # Standardized to 10 days for EMA50 stability
+    # Map confidence choices to numeric thresholds
+    CONF_THRESHOLDS = {
+        'all': 0,
+        'low': 20,
+        'medium': 50,
+        'high': 80
+    }
+    min_conf_val = CONF_THRESHOLDS.get(min_conf_str, 0)
     
-    # HTF Data (15 Min)
-    print("Fetching HTF (15min) data...")
-    htf_req = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-        start=start_time,
-        end=end_time,
-        feed="iex"
-    )
-    htf_data = client.get_stock_bars(htf_req).df
+    now_et = datetime.now(ET)
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
     
-    # LTF Data (1 Min)
-    print("Fetching LTF (1min) data...")
-    ltf_req = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-        start=start_time,
-        end=end_time,
-        feed="iex"
-    )
-    ltf_data = client.get_stock_bars(ltf_req).df
+    is_live = (market_open <= now_et <= market_close)
     
-    # Process data
-    htf_data = htf_data.reset_index()
-    ltf_data = ltf_data.reset_index()
-    htf_data.set_index('timestamp', inplace=True)
-    ltf_data.set_index('timestamp', inplace=True)
-    htf_data.sort_index(inplace=True)
-    ltf_data.sort_index(inplace=True)
-    
-    print(f"Data loaded. HTF: {len(htf_data)} bars, LTF: {len(ltf_data)} bars.")
+    if is_live:
+        print(f"🚀 [LIVE MODE] Monitoring {symbol} until market close ({market_close.strftime('%I:%M %p ET')})")
+    else:
+        print(f"📊 [HISTORICAL MODE] Analyzing {symbol} for today ({now_et.strftime('%Y-%m-%d')})")
     print("="*80)
+
+    # 1. Initial Scan (From Open to Now)
+    scan_start = market_open if now_et >= market_open else (now_et - timedelta(days=1)).replace(hour=9, minute=30)
+    scan_start_utc = scan_start.astimezone(timezone.utc)
     
-    # Get today's date
-    today_date = today.date()
-    current_time = today
+    print(f"Fetching data and scanning established signals since market open...")
     
-    # Analyze every 15 minutes during market hours
-    # Start from market open (9:30 AM ET)
-    market_open = today.replace(hour=9, minute=30, second=0, microsecond=0)
+    end_time_utc = datetime.now(timezone.utc)
+    lookback_start_utc = end_time_utc - timedelta(days=14) # 14 days for stable EMA50
     
-    # If current time is before market open, analyze from market open to now
-    # If current time is after market open, start from market open
-    if current_time < market_open:
-        print(f"\n⚠️  Market hasn't opened yet. Current time: {current_time.strftime('%I:%M %p ET')}")
-        print(f"Market opens at: {market_open.strftime('%I:%M %p ET')}")
+    htf_raw, ltf_raw, feed = fetch_data(client, symbol, lookback_start_utc, end_time_utc)
+    if htf_raw is None:
+        print("❌ CRITICAL: Could not fetch market data. Check API keys/connection.")
         return
     
-    analysis_start = market_open
+    htf_processed, ltf_processed = process_bars(htf_raw, ltf_raw)
     
-    print(f"\nAnalyzing signal conditions from {analysis_start.strftime('%I:%M %p ET')} to {current_time.strftime('%I:%M %p ET')}")
-    print("="*80)
+    # Perform Scan
+    scan_bars = ltf_processed[ltf_processed.index >= scan_start_utc]
     
-    # Sample key times
-    check_times = []
-    check_time = analysis_start
-    while check_time <= current_time:
-        check_times.append(check_time)
-        check_time += timedelta(minutes=15)
-    
-    for check_time in check_times:
-        check_time_utc = check_time.astimezone(timezone.utc)
-        
-        # Get data up to this point
-        htf_slice = htf_data[htf_data.index <= check_time_utc]
-        ltf_slice = ltf_data[ltf_data.index <= check_time_utc]
-        
-        if len(htf_slice) < 50 or len(ltf_slice) < 5:
-            continue
-        
-        # Limit to last 200 bars for performance
-        htf_slice = htf_slice.iloc[-200:]
-        ltf_slice = ltf_slice.iloc[-200:]
-        
-        # Calculate HTF bias
-        htf_analysis = htf_slice.copy()
-        htf_analysis['ema50'] = ta.ema(htf_analysis['close'], length=50)
-        
-        last_htf_close = htf_analysis['close'].iloc[-1]
-        last_htf_ema50 = htf_analysis['ema50'].iloc[-1]
-        htf_bias = "BULLISH" if last_htf_close > last_htf_ema50 else "BEARISH"
-        
-        # Calculate LTF indicators
-        ltf_analysis = ltf_slice.copy()
-        ltf_analysis = detect_fvg(ltf_analysis)
-        ltf_analysis = detect_order_block(ltf_analysis)
-        
-        # Check last candle
-        last_ltf = ltf_analysis.iloc[-1]
-        
-        # Get signal result (tuple: signal, confidence)
-        res = get_strategy_signal(htf_slice, ltf_slice)
-        
-        # Detailed output
-        print(f"\n⏰ Time: {check_time.strftime('%I:%M %p ET')}")
-        print(f"   {symbol} Price: ${last_ltf['close']:.2f}")
-        print(f"   HTF Bias: {htf_bias} (Price: ${last_htf_close:.2f}, EMA50: ${last_htf_ema50:.2f})")
-        
-        # Check for order blocks in recent candles
-        recent_ltf = ltf_analysis.iloc[-10:]
-        bull_ob_count = recent_ltf['is_bull_ob_candle'].sum()
-        bear_ob_count = recent_ltf['is_bear_ob_candle'].sum()
-        
-        print(f"   LTF Last Candle:")
-        print(f"      - Is Bullish OB Candle: {last_ltf['is_bull_ob_candle']}")
-        print(f"      - Is Bearish OB Candle: {last_ltf['is_bear_ob_candle']}")
-        print(f"      - Impulse: {last_ltf.get('impulse', False)}")
-        print(f"   Recent 10 candles: {bull_ob_count} bull OB, {bear_ob_count} bear OB")
-        
-        if res:
-            signal, confidence = res if isinstance(res, tuple) else (res, 0)
-            if signal:
-                print(f"   🚨 SIGNAL: {signal.upper()} | Confidence: {confidence}%")
-            else:
-                print(f"   ❌ No Signal")
-        else:
-            print(f"   ❌ No Signal")
+    signals_count = 0
+    for ts, row in scan_bars.iterrows():
+        if check_for_signal(ts, row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
+            signals_count += 1
             
-            # Explain why no signal
-            if htf_bias == "BULLISH" and not last_ltf['is_bull_ob_candle']:
-                print(f"      Reason: HTF is bullish but no bullish order block detected on LTF")
-            elif htf_bias == "BEARISH" and not last_ltf['is_bear_ob_candle']:
-                print(f"      Reason: HTF is bearish but no bearish order block detected on LTF")
-            elif htf_bias == "BULLISH":
-                print(f"      Reason: HTF is bullish but waiting for bullish order block")
-            elif htf_bias == "BEARISH":
-                print(f"      Reason: HTF is bearish but waiting for bearish order block")
-    
+    if signals_count == 0:
+        print("No historical signals detected today so far.")
+    else:
+        print(f"✅ Found {signals_count} historical signals today.")
+
+    # 2. Live Monitoring Loop
+    if is_live:
+        print("\n" + "-"*80)
+        print(f"📡 Now monitoring {symbol} LIVE. Alerts will print as candles close.")
+        print("-" * 80)
+        
+        try:
+            while datetime.now(ET) <= market_close:
+                # Wait for next minute candle to close (plus small buffer)
+                now = datetime.now()
+                sleep_seconds = 61 - now.second
+                # print(f"DEBUG: Sleeping {sleep_seconds}s for next candle...")
+                time.sleep(sleep_seconds)
+                
+                # Fetch latest
+                end_live = datetime.now(timezone.utc)
+                start_live = end_live - timedelta(days=2)
+                
+                h_live, l_live, _ = fetch_data(client, symbol, start_live, end_live)
+                if h_live is None: continue
+                
+                h_proc, l_proc = process_bars(h_live, l_live)
+                
+                # Check the last 3 bars just in case of slight polling delay
+                latest_bars = l_proc.iloc[-3:]
+                for ts, row in latest_bars.iterrows():
+                    check_for_signal(ts, row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
+                    
+        except KeyboardInterrupt:
+            print("\n🛑 Monitoring stopped by user.")
+            return
+
     print("\n" + "="*80)
-    print("\n📋 STRATEGY REQUIREMENTS FOR BUY SIGNAL:")
-    print("   1. HTF (15min) must be BULLISH: Price > EMA50")
-    print("   2. LTF (1min) must show Bullish Order Block:")
-    print("      - Previous candle was bearish (close < open)")
-    print("      - Current candle is bullish (close > open)")
-    print("      - Current candle is an 'impulse' (body > 1.5x avg body)")
-    print("      - Current close > previous high (structure break)")
-    print("\n📋 STRATEGY REQUIREMENTS FOR SELL SIGNAL:")
-    print("   1. HTF (15min) must be BEARISH: Price < EMA50")
-    print("   2. LTF (1min) must show Bearish Order Block:")
-    print("      - Previous candle was bullish (close > open)")
-    print("      - Current candle is bearish (close < open)")
-    print("      - Current candle is an 'impulse' (body > 1.5x avg body)")
-    print("      - Current close < previous low (structure break)")
-    print("="*80)
+    print("Analysis complete.")
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Analyze today's signal conditions for a given symbol")
-    parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze (default: SPY)")
-    
+    parser = argparse.ArgumentParser(description="Live or Historical signal analysis for SPY/SLV")
+    parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
     args = parser.parse_args()
-    
-    analyze_today_signals(args.symbol)
+    analyze_today_signals(args.symbol, args.min_conf)
