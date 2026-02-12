@@ -711,7 +711,6 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     # Determine bias based on signal for the notification
     # (Actually it's better to pass it in, but we can infer it: buy=BULLISH, sell=BEARISH)
     bias = "BULLISH" if signal == "buy" else "BEARISH"
-    # send_discord_notification(signal, 0, time_et_str, symbol, bias, confidence) # Moved below after price check
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -768,7 +767,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     print(f"DEBUG: Current Position for {symbol}: {qty_held} units (Side: {side_held}) | Options: {any_options_held}")
 
     # Discord Notification with final price
-    send_discord_notification(signal, price, time_et_str, symbol, bias, confidence)
+    # send_discord_notification(signal, price, time_et_str, symbol, bias, confidence)
 
     # 2. Global Position Cleanup (Cross-Asset Signal Flip)
     same_bias_held = False
