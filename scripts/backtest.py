@@ -146,8 +146,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
     
-    # 5. Persistence of Trend State
-    trend_state = {"bias": None, "count": 0, "last_date": None}
     
     for i in range(start_idx, len(ltf_data)):
         current_bar = ltf_data.iloc[i]
@@ -192,22 +190,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         res = get_causal_signal_from_precomputed(
             htf_signal_data,
             ltf_signal_data,
-            eval_ts,
-            trend_count=trend_state["count"]
+            eval_ts
         )
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
-
-        # UPDATE persistence
-        if signal in ["buy", "sell"]:
-            bias = "bullish" if signal == "buy" else "bearish"
-            today_str = current_time_et.strftime("%Y-%m-%d")
-            
-            if trend_state["last_date"] != today_str or trend_state["bias"] != bias:
-                trend_state["bias"] = bias
-                trend_state["count"] = 1
-                trend_state["last_date"] = today_str
-            else:
-                trend_state["count"] += 1
 
         # For option revaluation and diagnostics.
         htf_slice = htf_data[htf_data.index <= (current_time_utc - timedelta(minutes=15))]
@@ -403,10 +388,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
-            # 1. HARD BLOCK CHECK (Confidence 0)
-            if confidence <= 0:
-                print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for BUY")
-                continue
 
             # --- BUY SIGNAL ACTION ---
             # Check confidence threshold and daily cap
@@ -520,11 +501,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     active_trade = None
 
         elif signal == "sell":
-            # 1. HARD BLOCK CHECK (Confidence 0)
-            if confidence <= 0:
-                print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for SELL")
-                continue
-
             # --- SELL SIGNAL ACTION ---
             # Check confidence threshold and daily cap
             conf_ok = (confidence >= min_conf_val)
