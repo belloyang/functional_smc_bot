@@ -228,7 +228,7 @@ def send_discord_notification(signal, price, time_str, symbol, bias, confidence)
                 {"name": "Bias", "value": bias.upper(), "inline": True},
                 {"name": "Strategy", "value": "SMC Order Block + Impulse", "inline": False}
             ],
-            "footer": {"text": "Alpaca Bot Live"},
+            "footer": {"text": f"Alpaca Bot Live v{getattr(config, '__version__', '?.?.?')}"},
             "timestamp": datetime.now(timezone.utc).isoformat()
         }]
     }
@@ -272,7 +272,7 @@ def send_discord_live_trading_notification(signal, symbol, order_details, confid
             "title": f"📈 LIVE ORDER: {signal.upper()}",
             "color": color,
             "fields": fields,
-            "footer": {"text": "SMC Bot Live Execution (Alpaca)"},
+            "footer": {"text": f"SMC Bot Live Execution (Alpaca) v{getattr(config, '__version__', '?.?.?')}"},
             "timestamp": datetime.now(timezone.utc).isoformat()
         }]
     }

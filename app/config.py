@@ -1,5 +1,6 @@
 import os
 from alpaca.trading import TradingClient
+from . import __version__
 
 def load_env(file_path=".env"):
     """Simple helper to load .env variables without external dependencies."""

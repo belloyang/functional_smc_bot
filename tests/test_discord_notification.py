@@ -6,9 +6,10 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.bot import send_discord_live_trading_notification
+from app import __version__
 
 def test_live_notification():
-    print("Sending test live trading notification to Discord (Main Branch)...")
+    print(f"Sending test live trading notification to Discord (Main Branch) v{__version__}...")
     
     # Test case 1: Buy Option
     send_discord_live_trading_notification(
