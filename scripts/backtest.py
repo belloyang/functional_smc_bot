@@ -22,6 +22,7 @@ from app.bot import (
     precompute_strategy_features,
     get_causal_signal_from_precomputed,
     get_last_swing_low,
+    calculate_confidence,
 )
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
@@ -140,6 +141,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
     peak_equity = initial_balance
     
+    # --- TREND MATURITY INITIALIZATION ---
+    # tracked as a dict {bias: str, count: int, last_date: date}
+    trend_state = {"bias": None, "count": 0, "last_date": None}
+
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
@@ -185,14 +190,28 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # evaluate on the last fully closed 1m candle, then execute on current bar.
         if i < 1:
             continue
-        eval_ts = ltf_data.index[i - 1]
-        res = get_causal_signal_from_precomputed(
-            htf_signal_data,
-            ltf_signal_data,
-            eval_ts
-        )
-        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+        # 3. Get Signal
+        last_htf_row = htf_data[htf_data.index <= current_time_utc - timedelta(minutes=15)].iloc[-1]
+        current_bias = "bullish" if last_htf_row['close'] > last_htf_row['ema50'] else "bearish"
 
+        # RESET COUNT on BIAS FLIP or NEW DAY
+        today_date = current_time_et.date()
+
+        if trend_state.get("last_date") != today_date or trend_state["bias"] != current_bias:
+            trend_state["bias"] = current_bias
+            trend_state["count"] = 0
+            trend_state["last_date"] = today_date
+
+        signal, confidence = get_causal_signal_from_precomputed(htf_signal_data, ltf_signal_data, current_time_utc, trend_state)
+        
+        # Manually update trend_state count after signal generation
+        if signal in ["buy", "sell"]:
+            trend_state["count"] += 1
+            
+            # Re-calculating confidence with the correct trend_count to sync logic exactly
+            ltf_row = ltf_data.loc[current_time_utc]
+            confidence = calculate_confidence(ltf_row, last_htf_row, trend_count=trend_state["count"])
+        
         # For option revaluation and diagnostics.
         htf_slice = htf_data[htf_data.index <= (current_time_utc - timedelta(minutes=15))]
         if len(htf_slice) < 50:
@@ -282,6 +301,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -389,94 +409,99 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if signal == "buy":
             # --- BUY SIGNAL ACTION ---
             # Check confidence threshold and daily cap
-            conf_ok = (confidence >= min_conf_val)
+            conf_ok = (confidence > 0 and confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             
-            if position == 0 and in_window and trade_count_ok and conf_ok:
-                # Enter Long (Stock or Call)
-                if trade_type == "stock":
-                    # Determine SL/TP (Sync with bot.py)
-                    swing_low = get_last_swing_low(ltf_slice, window=5)
-                    if swing_low and swing_low < price:
-                        sl = swing_low
-                    else:
-                        sl = price * 0.995 # Fallback 0.5%
-                    
-                    risk_dist = price - sl
-                    tp = price + (risk_dist * 2.5)
-                    
-                    # Calculate Qty based on Risk (1% of balance)
-                    risk_amt = balance * 0.01
-                    qty_risk = int(risk_amt / risk_dist) if risk_dist > 0 else 0
-                    
-                    # Capped by Stock Allocation (e.g. 40%)
-                    max_stock_cost = balance * stock_budget_pct
-                    qty_cap = int(max_stock_cost / price)
-                    
-                    qty = min(qty_risk, qty_cap)
-                    
-                    if qty > 0:
-                        cost = qty * price
-                        balance -= cost
-                        position = qty
-                        entry_price = price
-                        daily_trade_count += 1
-
-                        # Store trade metadata for management
-                        active_trade = {
-                            'type': 'stock',
-                            'stop_loss': sl,
-                            'take_profit': tp,
-                            'entry_time': current_time_utc
-                        }
-
-                        trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty, 'sl': sl, 'tp': tp})
-                        print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty} | SL: {sl:.2f} | TP: {tp:.2f}")
-
-                elif trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
-                    T = days_to_expiry / 365.0
-                    sigma = current_vol if current_vol > 0 else 0.2
-                    premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
-                    contract_cost = premium * 100
-
-                    total_budget = balance * option_budget_pct
-                    current_risk_target = balance * config.RISK_PER_TRADE
-                    
-                    # Risk per contract is 20% premium (our SL)
-                    risk_per_contract = premium * 0.20 * 100
-                    qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
-                    
-                    # Still capped by total option allocation budget
-                    qty_cap = int(total_budget // contract_cost)
-                    
-                    qty = min(qty_risk, qty_cap)
-                    if qty > 5: qty = 5
-                    
-                    # Block entry if in cool-down
-                    if last_loss_exit_time:
-                        qty = 0
-                    
-                    if qty >= 1 and balance >= (contract_cost * qty):
-                        total_cost = contract_cost * qty
-                        balance -= total_cost
-                        position = qty
-                        entry_price = premium
-                        daily_trade_count += 1
-
-                        active_trade = {
-                            'strike': strike,
-                            'expiry_days': days_to_expiry,
-                            'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
-                            'entry_time': current_time_utc,
-                            'type': 'call',
-                            'stop_loss': premium * 0.80, # -20%
-                            'take_profit': premium * 1.50 # +50%
-                        }
-
-                        trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
-                        print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+            if position == 0 and in_window and trade_count_ok:
+                if not conf_ok:
+                    if confidence == 0:
+                        print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for {signal.upper()}")
+                    pass
+                else:
+                    # Enter Long (Stock or Call)
+                    if trade_type == "stock":
+                        # Determine SL/TP (Sync with bot.py)
+                        swing_low = get_last_swing_low(ltf_slice, window=5)
+                        if swing_low and swing_low < price:
+                            sl = swing_low
+                        else:
+                            sl = price * 0.995 # Fallback 0.5%
+                        
+                        risk_dist = price - sl
+                        tp = price + (risk_dist * 2.5)
+                        
+                        # Calculate Qty based on Risk (1% of balance)
+                        risk_amt = balance * 0.01
+                        qty_risk = int(risk_amt / risk_dist) if risk_dist > 0 else 0
+                        
+                        # Capped by Stock Allocation (e.g. 40%)
+                        max_stock_cost = balance * stock_budget_pct
+                        qty_cap = int(max_stock_cost / price)
+                        
+                        qty = min(qty_risk, qty_cap)
+                        
+                        if qty > 0:
+                            cost = qty * price
+                            balance -= cost
+                            position = qty
+                            entry_price = price
+                            daily_trade_count += 1
+    
+                            # Store trade metadata for management
+                            active_trade = {
+                                'type': 'stock',
+                                'stop_loss': sl,
+                                'take_profit': tp,
+                                'entry_time': current_time_utc
+                            }
+    
+                            trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty, 'sl': sl, 'tp': tp})
+                            print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty} | SL: {sl:.2f} | TP: {tp:.2f}")
+    
+                    elif trade_type == "options":
+                        strike = round(price)
+                        days_to_expiry = 7
+                        T = days_to_expiry / 365.0
+                        sigma = current_vol if current_vol > 0 else 0.2
+                        premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
+                        contract_cost = premium * 100
+    
+                        total_budget = balance * option_budget_pct
+                        current_risk_target = balance * config.RISK_PER_TRADE
+                        
+                        # Risk per contract is 20% premium (our SL)
+                        risk_per_contract = premium * 0.20 * 100
+                        qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                        
+                        # Still capped by total option allocation budget
+                        qty_cap = int(total_budget // contract_cost)
+                        
+                        qty = min(qty_risk, qty_cap)
+                        if qty > 5: qty = 5
+                        
+                        # Block entry if in cool-down
+                        if last_loss_exit_time:
+                            qty = 0
+                        
+                        if qty >= 1 and balance >= (contract_cost * qty):
+                            total_cost = contract_cost * qty
+                            balance -= total_cost
+                            position = qty
+                            entry_price = premium
+                            daily_trade_count += 1
+    
+                            active_trade = {
+                                'strike': strike,
+                                'expiry_days': days_to_expiry,
+                                'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
+                                'entry_time': current_time_utc,
+                                'type': 'call',
+                                'stop_loss': premium * 0.80, # -20%
+                                'take_profit': premium * 1.50 # +50%
+                            }
+    
+                            trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
+                            print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
 
             elif position < 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'put'):
                 # Exit Bearish Position due to Bullish Signal Flip
@@ -501,52 +526,57 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         elif signal == "sell":
             # --- SELL SIGNAL ACTION ---
             # Check confidence threshold and daily cap
-            conf_ok = (confidence >= min_conf_val)
+            conf_ok = (confidence > 0 and confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             
-            if position == 0 and in_window and trade_count_ok and conf_ok:
-                # Enter Short (Options only)
-                if trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
-                    sigma = current_vol if current_vol > 0 else 0.2
-                    premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
-                    contract_cost = premium * 100
-
-                    total_budget = balance * option_budget_pct
-                    current_risk_target = balance * config.RISK_PER_TRADE
-                    
-                    # Risk per contract is 20% premium (our SL)
-                    risk_per_contract = premium * 0.20 * 100
-                    qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
-                    
-                    qty_cap = int(total_budget // contract_cost)
-                    
-                    qty = min(qty_risk, qty_cap)
-                    if qty > 5: qty = 5
-                    
-                    # Block entry if in cool-down
-                    if last_loss_exit_time:
-                        qty = 0
-                    
-                    if qty >= 1 and balance >= (contract_cost * qty):
-                        total_cost = contract_cost * qty
-                        balance -= total_cost
-                        position = -qty # Negative denotes Put for logic
-                        entry_price = premium
-                        daily_trade_count += 1
-
-                        active_trade = {
-                            'strike': strike,
-                            'expiry_days': days_to_expiry,
-                            'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
-                            'entry_time': current_time_utc,
-                            'type': 'put',
-                            'stop_loss': premium * 0.80,
-                            'take_profit': premium * 1.50 # +50%
-                        }
-                        trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
-                        print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+            if position == 0 and in_window and trade_count_ok:
+                if not conf_ok:
+                    if confidence == 0:
+                        print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for {signal.upper()}")
+                    pass
+                else:
+                    # Enter Short (Options only)
+                    if trade_type == "options":
+                        strike = round(price)
+                        days_to_expiry = 7
+                        sigma = current_vol if current_vol > 0 else 0.2
+                        premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
+                        contract_cost = premium * 100
+    
+                        total_budget = balance * option_budget_pct
+                        current_risk_target = balance * config.RISK_PER_TRADE
+                        
+                        # Risk per contract is 20% premium (our SL)
+                        risk_per_contract = premium * 0.20 * 100
+                        qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                        
+                        qty_cap = int(total_budget // contract_cost)
+                        
+                        qty = min(qty_risk, qty_cap)
+                        if qty > 5: qty = 5
+                        
+                        # Block entry if in cool-down
+                        if last_loss_exit_time:
+                            qty = 0
+                        
+                        if qty >= 1 and balance >= (contract_cost * qty):
+                            total_cost = contract_cost * qty
+                            balance -= total_cost
+                            position = -qty # Negative denotes Put for logic
+                            entry_price = premium
+                            daily_trade_count += 1
+    
+                            active_trade = {
+                                'strike': strike,
+                                'expiry_days': days_to_expiry,
+                                'expiry_date': current_time_utc + timedelta(days=days_to_expiry),
+                                'entry_time': current_time_utc,
+                                'type': 'put',
+                                'stop_loss': premium * 0.80,
+                                'take_profit': premium * 1.50 # +50%
+                            }
+                            trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
+                            print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
 
             elif position > 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'call'):
                 # Exit Bullish Position due to Bearish Signal Flip

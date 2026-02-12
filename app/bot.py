@@ -164,43 +164,82 @@ def detect_order_block(df):
                               df['impulse'] & \
                               (df['close'] < df['low'].shift(1))
 
+    # Add RSI (14) for overextension filtering
+    df['rsi'] = ta.rsi(df['close'], length=14)
+
     return df
 
 def detect_structure_shift(df):
     # Not fully implemented in causal way for this snippet, relying on simpler OB/Impulse logic
     return df
 
-def calculate_confidence(ltf_row, last_htf):
+def calculate_confidence(ltf_row, last_htf, trend_count=0):
     """Calculates a confidence score between 0-100%."""
     score = 0
     
-    # 1. Impulse Intensity (40%)
-    if ltf_row.get('avg_body', 0) > 0:
-        ratio = ltf_row['body_size'] / ltf_row['avg_body']
-        impulse_score = min(40, max(0, (ratio - 1.5) / 1.5 * 40))
-        score += impulse_score
+    # --- HARD BLOCKS (REJECT ENTIRELY) ---
+    # 1. Maturity Hard Block: Don't chase trends that have produced > 5 signals
+    if trend_count > 5:
+        print(f"🛑 HARD BLOCK: Trend Maturity too high ({trend_count} signals). Rejecting.")
+        return 0
 
-    # 2. Volume Confirmation (20%)
-    if ltf_row.get('avg_vol', 0) > 0:
-        vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
-        vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
-        score += vol_score
-        
-    # 3. FVG Confluence (20%)
-    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
-        score += 20
-        
-    # 4. Trend Proximity (20%)
+    # 2. Overextension Hard Block
     price = ltf_row['close']
     ema = last_htf.get('ema50')
+    dist_pct = 0
     if ema:
         dist_pct = abs(price - ema) / ema
+        if dist_pct > 0.015: # 1.5% distance on SPY is excessive chase
+            print(f"🛑 HARD BLOCK: Overextension excessive ({dist_pct*100:.2f}%). Rejecting.")
+            return 0
+
+    # --- SCORING ---
+    # 1. Impulse Intensity (30%)
+    if ltf_row.get('avg_body', 0) > 0:
+        ratio = ltf_row['body_size'] / ltf_row['avg_body']
+        impulse_score = min(30, max(0, (ratio - 1.5) / 1.5 * 30))
+        score += impulse_score
+
+    # 2. Volume Confirmation (15%)
+    if ltf_row.get('avg_vol', 0) > 0:
+        vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
+        vol_score = min(15, max(0, (vol_ratio - 1.0) / 1.0 * 15))
+        score += vol_score
+        
+    # 3. FVG Confluence (15%)
+    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
+        score += 15
+        
+    # 4. Trend Proximity & Early-Stage (40%)
+    if ema:
+        # Reward proximity to EMA (Early stage)
         if dist_pct < 0.002:
             score += 20
         elif dist_pct < 0.005:
             score += 10
+            
+        # Penalize Overextension (Distance from EMA)
+        if dist_pct > 0.008: # 0.8% is starting to get overextended
+            score -= 30
+            print(f"⚠️ OVEREXTENSION: {dist_pct*100:.2f}% from EMA50. Reducing confidence.")
+
+    # 5. Trend Maturity (Count)
+    if trend_count >= 3:
+        penalty = (trend_count - 2) * 20 # More aggressive penalty
+        score -= penalty
+        print(f"⚠️ TREND MATURITY: Signal #{trend_count}. Reducing confidence by {penalty}%.")
+
+    # 6. RSI Filter
+    rsi = ltf_row.get('rsi', 50)
+    if rsi > 72: # Overbought
+        score -= 40
+        print(f"⚠️ RSI OVERBOUGHT ({rsi:.1f}). Reducing confidence.")
+    elif rsi < 28: # Oversold (for Sells)
+        if ltf_row.get('is_bear_ob_candle'):
+            score -= 40
+            print(f"⚠️ RSI OVERSOLD ({rsi:.1f}). Reducing confidence.")
     
-    return int(min(100, score))
+    return int(min(100, max(0, score)))
 
 def get_confidence_label(score):
     if score >= 80: return "🔥🔥 High"
@@ -293,10 +332,11 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 # ...
 
 
-def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
+def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame, trend_state=None):
     """
     Pure strategy function.
     Takes historical dataframes and returns a signal ('buy', 'sell', or None).
+    `trend_state` is a dict {bias: str, count: int} to track maturity.
     """
     # 1. HTF Direction
     htf = htf.copy()
@@ -339,7 +379,15 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
              signal = "sell"
 
     if signal:
-        confidence = calculate_confidence(last_closed, htf.iloc[-1])
+        # Handle Trend Maturity Counting
+        current_count = 0
+        if trend_state:
+            if trend_state.get("bias") == bias:
+                current_count = trend_state.get("count", 0) + 1
+            else:
+                current_count = 1 # Reset on bias flip
+        
+        confidence = calculate_confidence(last_closed, last_htf, trend_count=current_count)
 
     return signal, confidence
 
@@ -372,7 +420,7 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
     return htf, ltf
 
 
-def get_causal_signal_from_precomputed(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, evaluation_ts, ltf_window: int = 200):
+def get_causal_signal_from_precomputed(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, evaluation_ts, trend_override=None, ltf_window: int = 200):
     """
     Evaluate signal at a specific closed 1m candle timestamp.
     Uses only 15m candles that were already closed at that timestamp.
@@ -394,7 +442,19 @@ def get_causal_signal_from_precomputed(htf_df: pd.DataFrame, ltf_df: pd.DataFram
     if htf_causal.empty or len(htf_causal) < 50:
         return None
 
-    return get_strategy_signal(htf_causal, ltf_causal.iloc[-ltf_window:])
+    # Determine trend state
+    if trend_override is not None:
+        state_to_use = trend_override
+    else:
+        # Load trend state to determine maturity/count (Production/Live use)
+        # We try to load but fallback to None if it fails (e.g. backtests)
+        try:
+            state = load_trade_state()
+            state_to_use = state.get("global_trend_state")
+        except Exception:
+            state_to_use = None
+    
+    return get_strategy_signal(htf_causal, ltf_causal.iloc[-ltf_window:], trend_state=state_to_use)
 
 def generate_signal(symbol=None):
     if symbol is None:
@@ -568,6 +628,11 @@ def cancel_all_orders_for_symbol(symbol):
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
 def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+    # --- HARD FILTER CHECK ---
+    if confidence <= 0:
+        print(f"🛑 REJECTED: Confidence is 0 (Blocked by Strategy Filters) for {symbol}")
+        return
+
     # --- GLOBAL SAFETY CHECKS ---
     safety = load_global_safety_state()
     if safety.get("halted", False):
@@ -987,8 +1052,26 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
         else:
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
 
-    # 4. Final Notification
+    # 4. Persistence of Trend State
     if signal in ["buy", "sell"]:
+        # Update the global trend state to track how many signals we've had in this bias
+        bias = "bullish" if signal == "buy" else "bearish"
+        trend_state = state.get("global_trend_state", {"bias": None, "count": 0, "last_date": None})
+        
+        # RESET COUNT on BIAS FLIP or NEW DAY
+        today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+        if trend_state.get("last_date") != today_str or trend_state.get("bias") != bias:
+            trend_state["bias"] = bias
+            trend_state["count"] = 1
+            trend_state["last_date"] = today_str
+        else:
+            trend_state["count"] = trend_state.get("count", 0) + 1
+            
+        state["global_trend_state"] = trend_state
+        save_trade_state(state) # Persistent save
+        print(f"📈 Trend State Updated: {bias.upper()} Signal #{trend_state['count']}")
+        
         time_str = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p")
         # We only send notification if a trade was actually SUBMITTED, 
         # but place_trade is called whenever there's a signal.
@@ -1112,8 +1195,10 @@ def mark_loss():
 
 def get_state_file_path(symbol=None):
     """Returns the state file path, prioritized by --state-file then symbol-specific."""
-    if hasattr(args, 'state_file') and args.state_file:
-        return args.state_file
+    # Check if 'args' is in globals (available when bot.py is run as main)
+    global_args = globals().get('args')
+    if global_args and hasattr(global_args, 'state_file') and global_args.state_file:
+        return global_args.state_file
     if symbol:
         return f"trade_state_{symbol}.json"
     return STATE_FILE
@@ -1219,7 +1304,8 @@ def manage_trade_updates(target_symbol=None):
                     )
                     if symbol in state:
                         del state[symbol]
-                        save_trade_state(state, symbol=symbol)
+                    
+                    save_trade_state(state, symbol=symbol)
                     continue
                 
                 # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
