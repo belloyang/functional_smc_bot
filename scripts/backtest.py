@@ -532,8 +532,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         last_time_et = last_time_utc.astimezone(ET)
 
         if trade_type == "stock":
+            pnl = (last_price - entry_price) * position
             balance += position * last_price
-            trades.append({'time': last_time_et, 'type': 'mtm_stock', 'price': last_price, 'qty': position})
+            trades.append({'time': last_time_et, 'type': 'mtm_stock', 'price': last_price, 'qty': position, 'pnl': pnl})
         elif trade_type == "options":
             time_held = last_time_utc - active_trade['entry_time']
             days_passed = time_held.total_seconds() / (24 * 3600)
@@ -541,10 +542,26 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             # Use last available volatility
             sigma = htf_data.iloc[-1]['volatility']
             exit_premium = black_scholes_price(last_price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
+            pnl = (exit_premium - entry_price) * 100 * abs(position)
             balance += exit_premium * 100 * abs(position)
-            trades.append({'time': last_time_et, 'type': f'mtm_{active_trade["type"]}', 'price': exit_premium, 'qty': abs(position)})
+            trades.append({'time': last_time_et, 'type': f'mtm_{active_trade["type"]}', 'price': exit_premium, 'qty': abs(position), 'pnl': pnl})
         position = 0
         active_trade = None
+
+    # --- ROUND TRIP STATISTICS ---
+    # In this script, 'trades' contains entries and exits. 
+    # Exits have 'pnl' field.
+    exit_trades = [t for t in trades if 'pnl' in t]
+    wins = [t for t in exit_trades if t['pnl'] > 0]
+    losses = [t for t in exit_trades if t['pnl'] < 0]
+    breakevens = [t for t in exit_trades if t['pnl'] == 0]
+    
+    win_count = len(wins)
+    loss_count = len(losses)
+    be_count = len(breakevens)
+    total_exit_trades = len(exit_trades)
+    
+    win_rate = (win_count / total_exit_trades * 100) if total_exit_trades > 0 else 0
 
     print("="*30)
     print(f"Backtest Complete ({trade_type.upper()}).")
@@ -552,7 +569,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     print(f"Final Balance:   ${balance:.2f}")
     if initial_balance > 0:
         print(f"Return:          {((balance - initial_balance)/initial_balance)*100:.2f}%")
-    print(f"Total Trades:    {len(trades)}")
+    print(f"Total Trades:    {total_exit_trades} (Round Trips)")
+    print(f"Wins:            {win_count}")
+    print(f"Losses:          {loss_count}")
+    print(f"Break-evens:     {be_count}")
+    print(f"Win Rate:        {win_rate:.1f}%")
     
     # --- VISUALIZATION ---
     if equity_curve:
@@ -579,9 +600,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             f"Initial Balance: ${initial_balance:,.2f}\n"
             f"Final Balance: ${balance:,.2f}\n"
             f"Total Return: {final_return_pct:.2f}%\n"
-            f"Max Profit: ${max_profit:,.2f}\n"
             f"Max Drawdown: {max_drawdown_pct:.2f}%\n"
-            f"Total Trades: {len(trades)}"
+            f"Total Trades: {total_exit_trades}\n"
+            f"Wins: {win_count} | Losses: {loss_count} | BE: {be_count}\n"
+            f"Win Rate: {win_rate:.1f}%"
         )
         plt.text(0.02, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
