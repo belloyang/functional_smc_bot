@@ -363,7 +363,7 @@ def send_discord_notification(signal, price, time_et, symbol, bias, confidence):
                 {"name": "HTF Bias", "value": bias.upper(), "inline": True},
                 {"name": "Confidence", "value": f"{confidence}% [{label}]", "inline": True}
             ],
-            "footer": {"text": "SMC Bot Strategy Execution"}
+            "footer": {"text": f"SMC Bot Strategy Execution v{getattr(config, '__version__', '?.?.?')}"}
         }]
     }
     
@@ -405,7 +405,7 @@ def send_discord_live_trading_notification(signal, symbol, order_details, confid
             "title": f"📈 LIVE ORDER: {signal.upper()}",
             "color": color,
             "fields": fields,
-            "footer": {"text": "SMC Bot Live Execution"}
+            "footer": {"text": f"SMC Bot Live Execution v{getattr(config, '__version__', '?.?.?')}"}
         }]
     }
     
