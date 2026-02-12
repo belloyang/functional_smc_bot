@@ -27,7 +27,7 @@ def test_live_notification():
         strategy_bias="bullish"
     )
     
-    # Test case 2: Sell Stock
+    # Test case 2: Flip Exit
     send_discord_live_trading_notification(
         signal="flip_close_long_stock",
         symbol="SPY",
@@ -39,6 +39,33 @@ def test_live_notification():
         },
         confidence=65,
         strategy_bias="bearish"
+    )
+
+    # Test case 3: Virtual Stop Hit
+    send_discord_live_trading_notification(
+        signal="option_virtual_stop_hit",
+        symbol="SPY260320P00550000",
+        order_details={
+            "Action": "CLOSE (Market)",
+            "PnL": "-20.5%",
+            "Stop": "-20.0%",
+            "Type": "VIRTUAL STOP"
+        },
+        confidence=0,
+        strategy_bias="NEUTRAL"
+    )
+
+    # Test case 4: Daily Halt
+    send_discord_live_trading_notification(
+        signal="daily_halt_liquidation",
+        symbol="SPY",
+        order_details={
+            "Action": "CLOSE (Market)",
+            "Reason": "Daily Loss Limit Hit (-3%)",
+            "Equity": 9700.50
+        },
+        confidence=0,
+        strategy_bias="NEUTRAL"
     )
     
     print("✅ Test notifications sent. Please check your Discord channel.")

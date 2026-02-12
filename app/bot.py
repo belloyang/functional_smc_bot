@@ -1043,6 +1043,19 @@ def manage_option_expiry(target_symbol=None):
             if is_expiry_day:
                 print(f"⚠️ CRITICAL: {pos.symbol} expires TODAY ({expiry.date()})! Force Closing.")
                 trade_client.close_position(pos.symbol)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="expiry_close",
+                    symbol=pos.symbol,
+                    order_details={
+                        "Action": "CLOSE (Market)",
+                        "Reason": "Option Expiry",
+                        "Expiry": str(expiry.date())
+                    },
+                    confidence=100,
+                    strategy_bias="NEUTRAL"
+                )
             else:
                 days_left = (expiry.date() - now.date()).days
                 print(f"DEBUG: {pos.symbol} DTE: {days_left} days (Expires: {expiry.date()}) - Safe")
@@ -1169,6 +1182,20 @@ def manage_trade_updates(target_symbol=None):
                     if pl_pct < 0:
                         mark_loss()
                     trade_client.close_position(symbol)
+                    
+                    # Notify
+                    send_discord_live_trading_notification(
+                        signal=f"option_{reason.lower().replace(' ', '_')}_hit",
+                        symbol=symbol,
+                        order_details={
+                            "Action": "CLOSE (Market)",
+                            "PnL": f"{pl_pct*100:.1f}%",
+                            "Stop": f"{virtual_stop*100:.1f}%",
+                            "Type": reason
+                        },
+                        confidence=0,
+                        strategy_bias="NEUTRAL"
+                    )
                     # Cleanup state
                     if symbol in state:
                         del state[symbol]
@@ -1177,6 +1204,19 @@ def manage_trade_updates(target_symbol=None):
                 elif pl_pct >= OPTION_TP:
                     print(f"🎯 OPTION TAKE PROFIT HIT: {symbol} at {pl_pct*100:.1f}%. Closing.")
                     trade_client.close_position(symbol)
+                    
+                    # Notify
+                    send_discord_live_trading_notification(
+                        signal="option_tp_hit",
+                        symbol=symbol,
+                        order_details={
+                            "Action": "CLOSE (Market)",
+                            "PnL": f"{pl_pct*100:.1f}%",
+                            "Type": "Take Profit"
+                        },
+                        confidence=0,
+                        strategy_bias="NEUTRAL"
+                    )
                     if symbol in state:
                         del state[symbol]
                         save_trade_state(state, symbol=symbol)
@@ -1275,6 +1315,22 @@ def manage_trade_updates(target_symbol=None):
         cleaned = False
         for s in state_symbols:
             if s not in held_symbols:
+                # This was likely closed externally (e.g. Stop Loss hit on Alpaca)
+                print(f"📡 EXTERNAL CLOSE DETECTED: {s} is no longer in positions. Cleaning state.")
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="external_stop_detected",
+                    symbol=s,
+                    order_details={
+                        "Action": "CLEANUP",
+                        "Reason": "Position closed externally (Automated Stop-Loss?)",
+                        "System": "Alpaca Core"
+                    },
+                    confidence=0,
+                    strategy_bias="NEUTRAL"
+                )
+                
                 del state[s]
                 cleaned = True
         if cleaned:
@@ -1606,6 +1662,18 @@ if __name__ == "__main__":
                         for pos in positions:
                             trade_client.close_position(pos.symbol)
                             print(f"Closed {pos.symbol}")
+                            # Notify each liquidation
+                            send_discord_live_trading_notification(
+                                signal="daily_halt_liquidation",
+                                symbol=pos.symbol,
+                                order_details={
+                                    "Action": "CLOSE (Market)",
+                                    "Reason": "Daily Loss Limit Hit (-3%)",
+                                    "Equity": current_equity
+                                },
+                                confidence=0,
+                                strategy_bias="NEUTRAL"
+                            )
                     except Exception as e:
                         print(f"⚠️ Error closing positions: {e}")
                     session.daily_loss_limit_hit = True
