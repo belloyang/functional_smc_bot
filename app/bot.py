@@ -238,6 +238,50 @@ def send_discord_notification(signal, price, time_str, symbol, bias, confidence)
     except Exception as e:
         print(f"⚠️ Discord Notification Failed: {e}")
 
+def send_discord_live_trading_notification(signal, symbol, order_details, confidence, strategy_bias):
+    """Sends a detailed live trading notification to Discord."""
+    webhook_url = getattr(config, 'DISCORD_WEBHOOK_URL_LIVE_TRADING', None)
+    if not webhook_url:
+        return
+        
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    time_et_str = now_et.strftime("%I:%M %p")
+    
+    label = get_confidence_label(confidence)
+    # Color based on signal
+    color = 0x00ff00 if signal.lower() == "buy" else 0xff0000
+    if "close" in signal.lower() or "cleanup" in signal.lower() or "flip" in signal.lower():
+        color = 0x0000ff # Blue for neutral/closure
+    
+    fields = [
+        {"name": "Symbol", "value": f"**{symbol}**", "inline": True},
+        {"name": "Time (ET)", "value": time_et_str, "inline": True},
+        {"name": "HTF Bias", "value": strategy_bias.upper(), "inline": True},
+        {"name": "Confidence", "value": f"{confidence}% [{label}]", "inline": True},
+    ]
+    
+    # Add order details
+    if isinstance(order_details, dict):
+        for k, v in order_details.items():
+            fields.append({"name": k, "value": str(v), "inline": True})
+    else:
+        fields.append({"name": "Order Details", "value": str(order_details), "inline": False})
+    
+    payload = {
+        "embeds": [{
+            "title": f"📈 LIVE ORDER: {signal.upper()}",
+            "color": color,
+            "fields": fields,
+            "footer": {"text": "SMC Bot Live Execution (Alpaca)"},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+    
+    try:
+        requests.post(webhook_url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Live Notification Failed: {e}")
+
 def liquidity_sweep(df):
     # Not fully implemented in causal way for this snippet
     return df
@@ -612,6 +656,20 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             try:
                 cancel_all_orders_for_symbol(pos.symbol)
                 trade_client.close_position(pos.symbol)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal=f"cleanup_close_{pos.side}",
+                    symbol=pos.symbol,
+                    order_details={
+                        "Action": "CLOSE (Market)",
+                        "Side": pos.side,
+                        "Price": price,
+                        "Type": "Cross-Asset Cleanup"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
                 # UPDATE LOCAL STATE IMMEDIATELY (Treat as closed for logic follow-through)
                 if is_stock:
                     qty_held = 0
@@ -755,6 +813,22 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 )
                 
                 trade_client.submit_order(order)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal=f"buy_option_{contract.symbol[-9] if len(contract.symbol) > 9 else '?'}",
+                    symbol=trade_symbol,
+                    order_details={
+                        "Action": "BUY",
+                        "Qty": qty,
+                        "Entry": entry_est,
+                        "SL": sl_price,
+                        "TP": tp_price,
+                        "Type": "Market Bracket"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
                 print(f"✅ OPTION BRACKET SUBMITTED: {trade_symbol}")
                 # Update daily count
                 ticker_state["daily_trade_count"] = daily_count + 1
@@ -814,6 +888,22 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 )
                 trade_client.submit_order(order)
                 print("✅ BUY BRACKET ORDER SUBMITTED")
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="buy_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "BUY",
+                        "Qty": qty,
+                        "Entry": price,
+                        "SL": sl_price,
+                        "TP": tp_price,
+                        "Type": "Market Bracket"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
                 # Update daily count
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
@@ -830,6 +920,20 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
                 print("✅ SHORT CLOSE SUBMITTED")
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="flip_close_short_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "BUY (Market)",
+                        "Qty": abs(qty_held),
+                        "Price": price,
+                        "Type": "Trend Flip Exit"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
              except Exception as e:
                 print(f"❌ Close Short failed: {e}")
         else:
@@ -849,6 +953,20 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
                 trade_client.submit_order(order)
                 print("✅ LONG CLOSE SUBMITTED")
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="flip_close_long_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "SELL (Market)",
+                        "Qty": abs(qty_held),
+                        "Price": price,
+                        "Type": "Trend Flip Exit"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
             except Exception as e:
                  print(f"❌ Close Long failed: {e}")
                  

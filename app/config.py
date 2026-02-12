@@ -22,6 +22,7 @@ load_env()
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_API_SECRET")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")
 
 if not API_KEY or not API_SECRET:
     print("WARNING: ALPACA_API_KEY or ALPACA_API_SECRET not found in environment variables.")
