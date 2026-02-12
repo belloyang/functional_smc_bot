@@ -41,7 +41,7 @@ SYMBOL = "SPY" # default symbol
 TIMEFRAME_HTF = "15Min"
 TIMEFRAME_LTF = "1Min"
 
-RISK_PER_TRADE = 0.01  # 1%
+RISK_PER_TRADE = 0.02  # 2%
 try:
     ACCOUNT_BALANCE = trading_client.get_account().equity
 except Exception:

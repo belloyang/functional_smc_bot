@@ -33,7 +33,7 @@ RISK_PER_TRADE = config.RISK_PER_TRADE
 
 # Global ib is replaced by dynamic ibkr_mgr.ib in functions
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 async def get_bars(contract_or_symbol, timeframe, limit):
@@ -287,6 +287,11 @@ def detect_order_block(df):
     # Identify impulse (large body candles)
     body_size = abs(df['close'] - df['open'])
     avg_body = body_size.rolling(20).mean()
+    avg_vol = df['volume'].rolling(20).mean()
+    
+    df['body_size'] = body_size
+    df['avg_body'] = avg_body
+    df['avg_vol'] = avg_vol
     df['impulse'] = body_size > (avg_body * 1.5) # Arbitrary threshold for "strong" move
     
     # We are looking for where an OB *was* formed. 
@@ -319,29 +324,40 @@ def liquidity_sweep(df):
     # Not fully implemented in causal way for this snippet
     return df
 
-def calculate_confidence(ltf_row, htf_row):
-    """
-    Calculates a confidence score (0-100) based on signal quality.
-    """
+def calculate_confidence(ltf_row, last_htf):
+    """Calculates a confidence score between 0-100%."""
     score = 0
-    # 1. OB Quality (Impulse Strength)
-    body_size = abs(ltf_row['close'] - ltf_row['open'])
-    # We don't have avg_body here easily, but we can use the fact it's an impulse
-    score += 30 # Base score for having an OB at all
     
-    # 2. HTF Alignment Strength (Distance from EMA50)
-    # Higher distance = stronger trend
-    dist_pct = abs(htf_row['close'] - htf_row['ema50']) / htf_row['ema50']
-    score += min(40, dist_pct * 4000) # Max 40 points for 1% distance
-    
-    # 3. FVG Presence (Concrete gap indicates strong momentum)
-    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
-        score += 30
+    # 1. Impulse Intensity (40%)
+    if ltf_row.get('avg_body', 0) > 0:
+        ratio = ltf_row['body_size'] / ltf_row['avg_body']
+        impulse_score = min(40, max(0, (ratio - 1.5) / 1.5 * 40))
+        score += impulse_score
+
+    # 2. Volume Confirmation (20%)
+    if ltf_row.get('avg_vol', 0) > 0:
+        vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
+        vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
+        score += vol_score
         
+    # 3. FVG Confluence (20%)
+    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
+        score += 20
+        
+    # 4. Trend Proximity (20%)
+    price = ltf_row['close']
+    ema = last_htf.get('ema50')
+    if ema:
+        dist_pct = abs(price - ema) / ema
+        if dist_pct < 0.002:
+            score += 20
+        elif dist_pct < 0.005:
+            score += 10
+    
     return int(min(100, score))
 
 def get_confidence_label(score):
-    if score >= 80: return "🚀 High"
+    if score >= 80: return "🔥� High"
     if score >= 50: return "📈 Medium"
     return "⚖️ Low"
 
@@ -702,16 +718,34 @@ async def cancel_all_orders_for_symbol(symbol):
             ibkr_mgr.ib.cancelOrder(t.order)
             print(f"Cancelled order for {symbol}")
 
-async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=5, stock_budget_override=None, option_budget_override=None):
+async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
     ib = ibkr_mgr.ib
-    
-    # Discord Notification for entry
-    now_et = datetime.now(ZoneInfo("America/New_York"))
-    time_et_str = now_et.strftime("%I:%M %p")
-    # Determine bias based on signal for the notification
-    # (Actually it's better to pass it in, but we can infer it: buy=BULLISH, sell=BEARISH)
-    bias = "BULLISH" if signal == "buy" else "BEARISH"
-    # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
+    # Determine bias for notifications
+    bias = "bullish" if signal == "buy" else "bearish"
+
+    # --- HARD FILTER CHECK ---
+    if confidence <= 0:
+        print(f"🛑 REJECTED: Confidence is 0 (Blocked by Strategy Filters) for {symbol}")
+        return
+
+    # --- GLOBAL SAFETY CHECKS ---
+    safety = load_global_safety_state()
+    if safety.get("halted", False):
+        print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
+        return
+        
+    if safety.get("last_loss_time"):
+        try:
+            last_loss = datetime.fromisoformat(safety["last_loss_time"])
+            wait_mins = getattr(config, 'COOL_DOWN_MINUTES', 60)
+            time_diff = (datetime.now(timezone.utc) - last_loss).total_seconds() / 60
+            if time_diff < wait_mins:
+                print(f"🕒 COOL-DOWN: Last loss was {time_diff:.1f} mins ago. Waiting {wait_mins} total. Skipping.")
+                return
+        except Exception as e:
+            print(f"Error checking cool-down: {e}")
+
+    # --- TIME FILTER (09:40 AM - 3:55 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
     start_time = datetime.strptime("09:40:00", "%H:%M:%S").time()
@@ -720,7 +754,6 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     if current_time < start_time or current_time > end_time:
         print(f"🕒 TIME FILTER: Current time {current_time} is outside the 09:40-15:55 window. Skipping.")
         return
-
     # --- DAILY TRADE CAP ---
     state = load_trade_state(symbol)
     today_str = now_et.strftime("%Y-%m-%d")
@@ -1101,7 +1134,49 @@ from alpaca.trading.requests import ReplaceOrderRequest
 
 # ================= STATE MANAGEMENT =================
 
+# ================= STATE =================
 STATE_FILE = "trade_state.json"
+GLOBAL_SAFETY_FILE = "global_safety.json"
+
+def load_global_safety_state():
+    if os.path.exists(GLOBAL_SAFETY_FILE):
+        try:
+            with open(GLOBAL_SAFETY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"peak_equity": 0.0, "halted": False, "last_loss_time": None}
+
+def save_global_safety_state(state):
+    try:
+        with open(GLOBAL_SAFETY_FILE, "w") as f:
+            json.dump(state, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Error saving global safety state: {e}")
+
+def update_peak_equity(current_equity):
+    state = load_global_safety_state()
+    if current_equity > state.get("peak_equity", 0.0):
+        state["peak_equity"] = current_equity
+        save_global_safety_state(state)
+        print(f"📈 New Peak Equity: ${current_equity:.2f}")
+    
+    # Check for drawdown halt
+    max_dd = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.15)
+    peak = state.get("peak_equity", 0.0)
+    if peak > 0:
+        dd = (peak - current_equity) / peak
+        if dd >= max_dd and not state.get("halted", False):
+            state["halted"] = True
+            save_global_safety_state(state)
+            print(f"🚨 GLOBAL DRAWDOWN CIRCUIT BREAKER HIT ({dd*100:.1f}%)! Trading Halted.")
+    return state
+
+def mark_loss():
+    state = load_global_safety_state()
+    state["last_loss_time"] = datetime.now(timezone.utc).isoformat()
+    save_global_safety_state(state)
+    print("🕒 Post-Loss Cool-down Triggered (60 min).")
 
 def get_state_file_path(symbol=None):
     """Returns the state file path, prioritized by --state-file then symbol-specific."""

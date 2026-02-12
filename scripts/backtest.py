@@ -138,6 +138,13 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     current_equity = initial_balance       # Initialize for first bar
     daily_stop_hit = False # Initialize for the first day
     
+    # --- GLOBAL SAFETY INITIALIZATION ---
+    global_drawdown_hit = False
+    last_loss_exit_time = None
+    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 15)
+    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.25)
+    peak_equity = initial_balance
+    
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
@@ -151,9 +158,22 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
-        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:45 PM ET) ---
+        # 1. Global Safety Checks
+        if global_drawdown_hit:
+            break
+            
+        # 2. Cool-down Period Check (Post-Loss)
+        if last_loss_exit_time:
+            time_since_loss = (current_time_utc - last_loss_exit_time).total_seconds() / 60
+            if time_since_loss < COOL_DOWN_MINUTES:
+                # Still in cool-down, but we continue so we can manage open positions
+                pass
+            else:
+                last_loss_exit_time = None
+                
+        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
-        trade_window_end = current_time_et.replace(hour=15, minute=45, second=0, microsecond=0)
+        trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
@@ -194,7 +214,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
-                    last_exit_time = current_time_utc
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
@@ -240,7 +261,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     position = 0
                     active_trade = None
-                    last_exit_time = current_time_utc
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
@@ -296,11 +318,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             day_starting_balance = current_equity # Reset for new day
             daily_stop_hit = False
 
-        # Portfolio Loss Circuit Breaker (3% Daily Max)
+        # Portfolio Loss Circuit Breaker (4% Daily Max)
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
-        if daily_pnl_pct <= -0.03:
+        if daily_pnl_pct <= -0.04:
              if not daily_stop_hit:
-                 print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-3%). STOPPING FOR DAY.")
+                 print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-4%). STOPPING FOR DAY.")
                  if position != 0:
                      # Close position if hit
                      if trade_type == "stock":
@@ -328,9 +350,18 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
+            # 1. HARD BLOCK CHECK (Confidence 0)
+            if confidence <= 0:
+                # print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for BUY")
+                continue
+
             # --- BUY SIGNAL ACTION ---
             # Check daily cap if enabled
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
+            
+            # --- COOL-DOWN CHECK ---
+            if last_loss_exit_time:
+                continue
             if position == 0 and in_window and trade_count_ok:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
@@ -440,9 +471,18 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     active_trade = None
 
         elif signal == "sell":
+            # 1. HARD BLOCK CHECK (Confidence 0)
+            if confidence <= 0:
+                # print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for SELL")
+                continue
+
             # --- SELL SIGNAL ACTION ---
             # Check daily cap if enabled
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
+
+            # --- COOL-DOWN CHECK ---
+            if last_loss_exit_time:
+                continue
             if position == 0 and in_window and trade_count_ok:
                 # Enter Short (Options only)
                 if trade_type == "options":
