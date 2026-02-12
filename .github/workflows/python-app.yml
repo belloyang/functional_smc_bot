@@ -8,9 +8,9 @@ on:
   schedule:
     # Runs at 9:45 AM New York time (Eastern Time) Monday-Friday
     # During EDT (Daylight Saving Time): 9:45 AM EDT = 1:45 PM UTC (13:45)
-    # During EST (Standard Time): 9:45 AM EST = 2:45 PM UTC (14:45)
+    # During EST (Standard Time): 8:45 AM EST = 1:45 PM UTC (13:45)
     # Note: GitHub Actions uses UTC and does not auto-adjust for DST.
-    - cron: '45 14 * * 1-5'
+    - cron: '45 13 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -72,4 +72,4 @@ jobs:
       run: |
         # Run the bot for 6 hour session
         # Scheduled to run Monday-Friday at 9:45 AM New York time
-        python -m app.bot SLV --session-duration 6
+        python -m app.bot SLV --session-duration 5.8
