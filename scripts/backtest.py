@@ -54,7 +54,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     
-    end_time = datetime.now(timezone.utc)
+    # Anchor to midnight UTC for reproducibility if no specific date is given
+    end_time = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start_time = end_time - timedelta(days=days_back + 20) # Extra data for vol calc
     
     # HTF Data (15 Min)
@@ -132,6 +133,13 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     current_equity = initial_balance       # Initialize for first bar
     daily_stop_hit = False # Initialize for the first day
     
+    # --- GLOBAL SAFETY INITIALIZATION ---
+    global_drawdown_hit = False
+    last_loss_exit_time = None
+    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 15)
+    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
+    peak_equity = initial_balance
+    
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
@@ -145,6 +153,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Convert to US/Eastern for filtering and logging
         current_time_et = current_time_utc.astimezone(ET)
         
+        # 1. Global Safety Checks
+        if global_drawdown_hit:
+            break
+            
+        # 2. Cool-down Period Check (Post-Loss)
+        if last_loss_exit_time:
+            time_since_loss = (current_time_utc - last_loss_exit_time).total_seconds() / 60
+            if time_since_loss < COOL_DOWN_MINUTES:
+                # Still in cool-down, but we continue so we can manage open positions
+                pass
+            else:
+                last_loss_exit_time = None
+                
         # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
         trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
@@ -193,6 +214,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'stop_loss_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -244,6 +267,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"stop_loss_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -301,12 +326,40 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             last_trade_date = current_date
             day_starting_balance = current_equity # Reset for new day
             daily_stop_hit = False
+            
+        # --- EQUITY TRACKING (REAL-TIME) ---
+        current_equity = balance
+        if position != 0 and active_trade:
+            if trade_type == "stock":
+                current_equity += position * price
+            elif trade_type == "options":
+                # Recalculate already handled during management, but for consistency:
+                time_held = current_time_utc - active_trade['entry_time']
+                days_passed = time_held.total_seconds() / (24 * 3600)
+                T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                tracking_premium = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type=active_trade['type'])
+                current_equity += abs(position) * tracking_premium * 100
+        
+        equity_curve.append({'time': current_time_et, 'balance': current_equity})
+
+        # Update Peak Equity
+        if current_equity > peak_equity:
+            peak_equity = current_equity
+            
+        # Global Drawdown Breaker Check
+        current_drawdown = (peak_equity - current_equity) / peak_equity if peak_equity > 0 else 0
+        if current_drawdown >= MAX_DRAWDOWN_PCT:
+            print(f"[{current_time_et}] 🚨 GLOBAL DRAWDOWN BREAKER HIT ({current_drawdown*100:.1f}%). Peak Equity was: ${peak_equity:.2f}")
+            print(f"[{current_time_et}] 🚨 HALTING ALL TRADING.")
+            global_drawdown_hit = True
+            break # Exit loop immediately
 
         # Portfolio Loss Circuit Breaker (4% Daily Max)
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
         if daily_pnl_pct <= -0.04:
              if not daily_stop_hit:
                  print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-4%). STOPPING FOR DAY.")
+                 daily_stop_hit = True
                  if position != 0:
                      # Close position if hit
                      if trade_type == "stock":
@@ -389,7 +442,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.02 # Risk 2% of total equity
+                    current_risk_target = balance * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100
@@ -400,6 +453,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     
                     qty = min(qty_risk, qty_cap)
                     if qty > 5: qty = 5
+                    
+                    # Block entry if in cool-down
+                    if last_loss_exit_time:
+                        qty = 0
                     
                     if qty >= 1 and balance >= (contract_cost * qty):
                         total_cost = contract_cost * qty
@@ -457,7 +514,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_budget_pct
-                    current_risk_target = balance * 0.02 # Risk 2% of total equity
+                    current_risk_target = balance * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100
@@ -467,6 +524,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     
                     qty = min(qty_risk, qty_cap)
                     if qty > 5: qty = 5
+                    
+                    # Block entry if in cool-down
+                    if last_loss_exit_time:
+                        qty = 0
                     
                     if qty >= 1 and balance >= (contract_cost * qty):
                         total_cost = contract_cost * qty
@@ -511,25 +572,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     position = 0
                     active_trade = None
 
-        # --- EQUITY TRACKING (END OF BAR) ---
-        current_equity = balance
-        if position != 0 and active_trade:
-            if trade_type == "stock":
-                current_equity += position * price
-            elif trade_type == "options":
-                time_held = current_time_utc - active_trade['entry_time']
-                days_passed = time_held.total_seconds() / (24 * 3600)
-                T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
-                tracking_premium = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, current_vol, type=active_trade['type'])
-                current_equity += abs(position) * tracking_premium * 100
-
-        equity_curve.append({'time': current_time_et, 'balance': current_equity})
+        # --- (Removed) Redundant Equity Tracking Block ---
 
     # End of backtest - Mark to Market
     if position != 0 and active_trade:
-        last_price = ltf_data.iloc[-1]['close']
-        last_time_utc = ltf_data.index[-1]
-        last_time_et = last_time_utc.astimezone(ET)
+        # Use values from the LAST processed bar to avoid look-ahead bias if we halted early
+        last_price = price 
+        last_time_utc = current_time_utc
+        last_time_et = current_time_et
 
         if trade_type == "stock":
             pnl = (last_price - entry_price) * position

@@ -36,7 +36,7 @@ TIMEFRAME_LTF = "1Min"
 # Note: TradingClient will fail if keys are None, but we catch it here
 trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
 
-RISK_PER_TRADE = 0.01  # 1%
+RISK_PER_TRADE = 0.02  # 2%
 try:
     ACCOUNT_BALANCE = trading_client.get_account().equity
 except Exception:
@@ -48,3 +48,7 @@ ENABLE_OPTIONS = False # Set to True to trade options instead of shares
 STOCK_ALLOCATION_PCT = 0.80   # Max 80% of equity for stock positions per ticker
 OPTIONS_ALLOCATION_PCT = 0.15 # Max 15% of equity for all option premiums (Global)
 DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
+
+# --- DRAWDOWN & BEHAVIORAL SAFETY ---
+MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from peak
+COOL_DOWN_MINUTES = 15        # Wait period after any losing trade

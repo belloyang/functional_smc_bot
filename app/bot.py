@@ -568,6 +568,20 @@ def cancel_all_orders_for_symbol(symbol):
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
 def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+    # --- GLOBAL SAFETY CHECKS ---
+    safety = load_global_safety_state()
+    if safety.get("halted", False):
+        print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
+        return
+        
+    if safety.get("last_loss_time"):
+        last_loss = datetime.fromisoformat(safety["last_loss_time"])
+        wait_mins = getattr(config, 'COOL_DOWN_MINUTES', 60)
+        time_diff = (datetime.now(timezone.utc) - last_loss).total_seconds() / 60
+        if time_diff < wait_mins:
+            print(f"🕒 COOL-DOWN: Last loss was {time_diff:.1f} mins ago. Waiting {wait_mins} total. Skipping.")
+            return
+
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
     current_time = now_et.time()
@@ -1041,6 +1055,47 @@ from alpaca.trading.requests import ReplaceOrderRequest
 # ================= STATE MANAGEMENT =================
 
 STATE_FILE = "trade_state.json"  # Default fallback
+GLOBAL_SAFETY_FILE = "global_safety.json"
+
+def load_global_safety_state():
+    if os.path.exists(GLOBAL_SAFETY_FILE):
+        try:
+            with open(GLOBAL_SAFETY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"peak_equity": 0.0, "halted": False, "last_loss_time": None}
+
+def save_global_safety_state(state):
+    try:
+        with open(GLOBAL_SAFETY_FILE, "w") as f:
+            json.dump(state, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Error saving global safety state: {e}")
+
+def update_peak_equity(current_equity):
+    state = load_global_safety_state()
+    if current_equity > state.get("peak_equity", 0.0):
+        state["peak_equity"] = current_equity
+        save_global_safety_state(state)
+        print(f"📈 New Peak Equity: ${current_equity:.2f}")
+    
+    # Check for drawdown halt
+    max_dd = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.15)
+    peak = state.get("peak_equity", 0.0)
+    if peak > 0:
+        dd = (peak - current_equity) / peak
+        if dd >= max_dd and not state.get("halted", False):
+            state["halted"] = True
+            save_global_safety_state(state)
+            print(f"🚨 GLOBAL DRAWDOWN CIRCUIT BREAKER HIT ({dd*100:.1f}%)! Trading Halted.")
+    return state
+
+def mark_loss():
+    state = load_global_safety_state()
+    state["last_loss_time"] = datetime.now(timezone.utc).isoformat()
+    save_global_safety_state(state)
+    print("🕒 Post-Loss Cool-down Triggered (60 min).")
 
 def get_state_file_path(symbol=None):
     """Returns the state file path, prioritized by --state-file then symbol-specific."""
@@ -1111,6 +1166,8 @@ def manage_trade_updates(target_symbol=None):
                 if pl_pct <= virtual_stop:
                     reason = "VIRTUAL STOP" if virtual_stop > -0.20 else "STOP LOSS"
                     print(f"🛑 OPTION {reason} HIT: {symbol} at {pl_pct*100:.1f}% (Stop: {virtual_stop*100:.1f}%). Closing.")
+                    if pl_pct < 0:
+                        mark_loss()
                     trade_client.close_position(symbol)
                     # Cleanup state
                     if symbol in state:
@@ -1200,6 +1257,10 @@ def manage_trade_updates(target_symbol=None):
                     trade_client.replace_order(stop_order.id, replace_req)
                     print(f"✅ Stop Loss Updated for {symbol}")
                 except Exception as e:
+                    # Check if the stop was actually hit (e.g. order filled/cancelled)
+                    # This is a bit complex in live, usually handled by events, but here
+                    # if the replace fails because the order is gone, it might have been hit.
+                    pass
                     print(f"❌ Failed to update Stop Loss for {symbol}: {e}")
 
     except Exception as e:
@@ -1520,6 +1581,10 @@ if __name__ == "__main__":
                 # 2. Daily Loss Limit Check (3%)
                 account = trade_client.get_account()
                 current_equity = float(account.equity)
+                
+                # Update Peak Equity and Check Drawdown Halt
+                update_peak_equity(current_equity)
+                
                 current_date = timestamp_et.date()
                 
                 # Reset daily starting equity at start of new trading day
@@ -1533,7 +1598,8 @@ if __name__ == "__main__":
                 daily_pnl_pct = (current_equity - session.day_starting_equity) / session.day_starting_equity if session.day_starting_equity > 0 else 0
                 if daily_pnl_pct <= -0.03 and not session.daily_loss_limit_hit:
                     print(f"🛑 DAILY LOSS LIMIT HIT (-3%). Current: ${current_equity:,.2f} | Start: ${session.day_starting_equity:,.2f} | Loss: {daily_pnl_pct*100:.2f}%")
-                    print("🛑 Closing all positions and stopping trading for today.")
+                    session.daily_loss_limit_hit = True
+                    mark_loss()
                     # Close all positions
                     try:
                         positions = trade_client.get_all_positions()
