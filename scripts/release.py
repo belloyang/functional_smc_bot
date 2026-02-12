@@ -58,8 +58,9 @@ def main():
     current_version = get_current_version()
     print(f"Current version: {current_version}")
 
-    # 1. Release Phase: Remove -rc suffix
-    release_version = current_version.split('-')[0]
+    # 1. Release Phase: Remove only the -rc suffix
+    release_version = current_version.removesuffix("-rc")
+    
     if release_version == current_version:
         print(f"Version {current_version} is already a release version. Skipping release phase.")
     else:
@@ -69,9 +70,13 @@ def main():
         run_command(["git", "tag", "-a", f"v{release_version}", "-m", f"Version {release_version}"], args.dry_run)
         print(f"✅ Released and tagged v{release_version}")
 
-    # 2. Bump Phase: Increment version and add -rc
-    next_base_version = bump_version(release_version, args.type)
-    next_version = f"{next_base_version}-rc"
+    # 2. Bump Phase: Increment version and restore suffix + -rc
+    # Extract base version (digits only) and any intermediate suffix
+    base_raw = release_version.split('-')[0]
+    suffix = release_version[len(base_raw):] # e.g., "-ibkr"
+    
+    next_base_version = bump_version(base_raw, args.type)
+    next_version = f"{next_base_version}{suffix}-rc"
     
     update_version_file(next_version, args.dry_run)
     run_command(["git", "add", str(VERSION_FILE)], args.dry_run)
