@@ -302,11 +302,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             day_starting_balance = current_equity # Reset for new day
             daily_stop_hit = False
 
-        # Portfolio Loss Circuit Breaker (3% Daily Max)
+        # Portfolio Loss Circuit Breaker (4% Daily Max)
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
-        if daily_pnl_pct <= -0.03:
+        if daily_pnl_pct <= -0.04:
              if not daily_stop_hit:
-                 print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-3%). STOPPING FOR DAY.")
+                 print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-4%). STOPPING FOR DAY.")
                  if position != 0:
                      # Close position if hit
                      if trade_type == "stock":

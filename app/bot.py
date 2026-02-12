@@ -1080,8 +1080,8 @@ def save_trade_state(state, symbol=None):
 def manage_trade_updates(target_symbol=None):
     """
     Monitors active trades and adjusts Stop Losses.
-    1. Break-Even: If Profit > 15%, move SL to Entry.
-    2. Profit Lock: If Profit > 30%, move SL to +15% Profit.
+    1. Stocks: Stepped Trailing Stop (10% increments).
+    2. Options: Hybrid Trailing (BE at 10%, Lock 10% at 20%, Lock 20% at 30%).
     """
     try:
         positions = trade_client.get_all_positions()
