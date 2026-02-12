@@ -372,6 +372,48 @@ def send_discord_notification(signal, price, time_et, symbol, bias, confidence):
     except Exception as e:
         print(f"Failed to send Discord notification: {e}")
 
+def send_discord_live_trading_notification(signal, symbol, order_details, confidence, strategy_bias):
+    webhook_url = getattr(config, 'DISCORD_WEBHOOK_URL_LIVE_TRADING', None)
+    if not webhook_url:
+        return
+        
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    time_et_str = now_et.strftime("%I:%M %p")
+    
+    label = get_confidence_label(confidence)
+    # Color based on signal
+    color = 0x00ff00 if signal.lower() == "buy" else 0xff0000
+    if "close" in signal.lower() or "cleanup" in signal.lower() or "flip" in signal.lower():
+        color = 0x0000ff # Blue for neutral/closure
+    
+    fields = [
+        {"name": "Symbol", "value": symbol, "inline": True},
+        {"name": "Time (ET)", "value": time_et_str, "inline": True},
+        {"name": "HTF Bias", "value": strategy_bias.upper(), "inline": True},
+        {"name": "Confidence", "value": f"{confidence}% [{label}]", "inline": True},
+    ]
+    
+    # Add order details
+    if isinstance(order_details, dict):
+        for k, v in order_details.items():
+            fields.append({"name": k, "value": str(v), "inline": True})
+    else:
+        fields.append({"name": "Order Details", "value": str(order_details), "inline": False})
+    
+    payload = {
+        "embeds": [{
+            "title": f"📈 LIVE ORDER: {signal.upper()}",
+            "color": color,
+            "fields": fields,
+            "footer": {"text": "SMC Bot Live Execution"}
+        }]
+    }
+    
+    try:
+        requests.post(webhook_url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Failed to send live trading Discord notification: {e}")
+
 # ================= STRATEGY =================
 
 def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
@@ -754,6 +796,20 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 close_order = MarketOrder(action, abs(p.position))
                 ib.placeOrder(p.contract, close_order)
                 
+                # Notify
+                send_discord_live_trading_notification(
+                    signal=f"cleanup_close_{side_held}",
+                    symbol=p.contract.localSymbol,
+                    order_details={
+                        "Action": action,
+                        "Qty": abs(p.position),
+                        "Price": price,
+                        "Type": "Market (Signal Flip)"
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
+                
                 # Update local state
                 if is_stock:
                     qty_held = 0
@@ -866,6 +922,21 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(opt_contract, o)
                 
+                # Notify
+                send_discord_live_trading_notification(
+                    signal=f"buy_option_{opt_contract.right}",
+                    symbol=opt_contract.localSymbol,
+                    order_details={
+                        "Action": action,
+                        "Qty": qty,
+                        "Entry": entry_est,
+                        "SL": sl_price,
+                        "TP": tp_price
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
+                
                 print(f"✅ OPTION BRACKET SUBMITTED: {opt_contract.localSymbol}")
                 # Update state
                 ticker_state["daily_trade_count"] = daily_count + 1
@@ -897,6 +968,21 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(contract, o)
                 
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="buy_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "BUY",
+                        "Qty": qty,
+                        "Entry": price,
+                        "SL": sl_price,
+                        "TP": tp_price
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
+                
                 print("✅ BUY BRACKET ORDER SUBMITTED")
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
@@ -910,6 +996,19 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 ib.reqGlobalCancel()
                 close_order = MarketOrder('BUY', abs(qty_held))
                 ib.placeOrder(Stock(symbol, 'SMART', 'USD'), close_order)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="flip_close_short_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "BUY (Market)",
+                        "Qty": abs(qty_held),
+                        "Price": price
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
                 print("✅ SHORT CLOSE SUBMITTED")
              except Exception as e:
                 print(f"❌ Close Short failed: {e}")
@@ -927,6 +1026,19 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 ib.reqGlobalCancel()
                 close_order = MarketOrder('SELL', abs(qty_held))
                 ib.placeOrder(Stock(symbol, 'SMART', 'USD'), close_order)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="flip_close_long_stock",
+                    symbol=symbol,
+                    order_details={
+                        "Action": "SELL (Market)",
+                        "Qty": abs(qty_held),
+                        "Price": price
+                    },
+                    confidence=confidence,
+                    strategy_bias=bias
+                )
                 print("✅ LONG CLOSE SUBMITTED")
             except Exception as e:
                  print(f"❌ Close Long failed: {e}")

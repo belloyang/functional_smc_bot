@@ -52,3 +52,7 @@ ENABLE_OPTIONS = False # Set to True to trade options instead of shares
 STOCK_ALLOCATION_PCT = 0.80   # Max 80% of equity for stock positions per ticker
 OPTIONS_ALLOCATION_PCT = 0.15 # Max 15% of equity for all option premiums (Global)
 DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
+
+# --- NOTIFICATIONS ---
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")
