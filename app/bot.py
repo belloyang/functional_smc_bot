@@ -568,6 +568,14 @@ def cancel_all_orders_for_symbol(symbol):
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
 def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+    # Determine bias for notifications
+    bias = "bullish" if signal == "buy" else "bearish"
+
+    # --- HARD FILTER CHECK ---
+    if confidence <= 0:
+        print(f"🛑 REJECTED: Confidence is 0 (Blocked by Strategy Filters) for {symbol}")
+        return
+
     # --- GLOBAL SAFETY CHECKS ---
     safety = load_global_safety_state()
     if safety.get("halted", False):
