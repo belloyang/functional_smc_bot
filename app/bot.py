@@ -53,23 +53,45 @@ async def get_bars(contract_or_symbol, timeframe, limit):
     else:
         symbol = contract_or_symbol
         contract = Stock(symbol, 'SMART', 'USD')
-    
-    # Sequential Fallback for Market Data Types (To bypass subscription requirements)
-    # Options often return 'no data' for MIDPOINT at SMART if looking for high-resolution historical.
-    # We try SMART first, then specific major exchanges if it fails.
-    what_to_show_options = ['MIDPOINT', 'TRADES', 'BID', 'ASK']
-    exchanges = ['SMART', 'CBOE', 'PHLX', 'ARCA']
+
+    is_option_contract = isinstance(contract, Option)
+
+    # Sequential fallback tuned by security type:
+    # - Stocks: request only stock-appropriate exchange/data combos.
+    # - Options: broader fallback across whatToShow and exchanges.
+    if is_option_contract:
+        what_to_show_options = ['MIDPOINT', 'TRADES', 'BID', 'ASK']
+        exchanges = ['SMART', 'CBOE', 'PHLX', 'ARCA']
+    else:
+        # Avoid option-only exchanges for stocks; these produce repetitive 162 errors.
+        what_to_show_options = ['TRADES', 'MIDPOINT']
+        exchanges = ['SMART']
+
     bars = None
     
     for wts in what_to_show_options:
         for exch in exchanges:
+            # Do not mutate the original contract object between retries.
+            if isinstance(contract, Stock):
+                req_contract = Stock(symbol, exch, 'USD')
+            elif isinstance(contract, Option):
+                req_contract = Option(
+                    contract.symbol,
+                    contract.lastTradeDateOrContractMonth,
+                    contract.strike,
+                    contract.right,
+                    exch
+                )
+                req_contract.tradingClass = contract.tradingClass
+                req_contract.multiplier = contract.multiplier
+            else:
+                req_contract = contract
+                req_contract.exchange = exch
+
             try:
-                if exch != 'SMART':
-                    contract.exchange = exch
-                
-                # print(f"DEBUG: Requesting {wts} for {contract.localSymbol} at {exch}...")
+                # print(f"DEBUG: Requesting {wts} for {symbol} at {exch}...")
                 bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
-                    contract,
+                    req_contract,
                     endDateTime='',
                     durationStr='14 D', # Match analyze_today.py for EMA50 stability
                     barSizeSetting=bar_size,
@@ -80,8 +102,6 @@ async def get_bars(contract_or_symbol, timeframe, limit):
                 )
                 if bars:
                     # print(f"✅ Successfully fetched {wts} for {symbol} at {exch}")
-                    # Revert to SMART if we changed it
-                    contract.exchange = 'SMART'
                     break
             except Exception:
                 continue
