@@ -10,8 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import (
-    precompute_strategy_features,
-    get_causal_signal_from_precomputed,
+    get_strategy_signal,
     get_confidence_label,
     send_discord_notification
 )
@@ -50,10 +49,11 @@ def fetch_data(client, symbol, start_time, end_time):
 
 def process_bars(htf_df, ltf_df):
     """
-    Pre-calculate all indicators on the full history to ensure stability.
-    Uses the same helper as app.bot to guarantee parity.
+    Reset index for processing (matching live bot behavior).
     """
-    return precompute_strategy_features(htf_df, ltf_df)
+    htf_df = htf_df.reset_index()
+    ltf_df = ltf_df.reset_index()
+    return htf_df, ltf_df
 
 def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
     """Checks if a signal exists at a specific timestamp and prints if new."""
@@ -63,8 +63,15 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     else:
         ts = ts.tz_convert('UTC')
 
-    # Evaluate using the same causal helper as app.bot.
-    res = get_causal_signal_from_precomputed(htf_data, ltf_data, ts)
+    # Slice data up to current timestamp (matching live bot behavior)
+    htf_slice = htf_data[htf_data['timestamp'] <= ts]
+    ltf_slice = ltf_data[ltf_data['timestamp'] <= ts]
+    
+    if len(htf_slice) < 50 or len(ltf_slice) < 5:
+        return False
+    
+    # Use the same signal generation as live bot
+    res = get_strategy_signal(htf_slice, ltf_slice)
     if not res:
         return False
 
@@ -72,8 +79,8 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     if signal_raw is None:
         return False
 
-    # For logging only: compute causal HTF row for displayed bias.
-    htf_causal = htf_data[htf_data['timestamp'] <= (ts - timedelta(minutes=15))]
+    # For logging: get HTF bias from the sliced data
+    htf_causal = htf_slice
     if len(htf_causal) < 50:
         return False
     
@@ -94,12 +101,14 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     time_et = ts.tz_convert(ET).strftime("%I:%M %p")
     
     label = get_confidence_label(confidence)
-    last_htf = htf_causal.iloc[-1]
-    bias = "BULLISH" if last_htf['close'] > last_htf['ema50'] else "BEARISH"
+    
+    # Calculate bias from HTF data (get_strategy_signal already calculated EMA internally)
+    # We'll determine bias from the signal itself
+    bias = "BULLISH" if signal == "BUY" else "BEARISH"
     
     print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
     print(f"   Price: ${ltf_row['close']:.2f}")
-    print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
+    print(f"   HTF Bias: {bias}")
     print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
     print("-" * 40)
     
