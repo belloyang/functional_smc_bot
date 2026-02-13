@@ -59,6 +59,16 @@ def process_bars(htf_df, ltf_df):
     """
     htf = htf_df.reset_index() if 'timestamp' not in htf_df.columns else htf_df.copy()
     ltf = ltf_df.reset_index() if 'timestamp' not in ltf_df.columns else ltf_df.copy()
+    if 'timestamp' not in htf.columns and 'date' in htf.columns:
+        htf = htf.rename(columns={'date': 'timestamp'})
+    if 'timestamp' not in ltf.columns and 'date' in ltf.columns:
+        ltf = ltf.rename(columns={'date': 'timestamp'})
+
+    # Normalize timestamps to tz-aware UTC for stable comparisons with scan_start_utc.
+    htf['timestamp'] = pd.to_datetime(htf['timestamp'], utc=True, errors='coerce')
+    ltf['timestamp'] = pd.to_datetime(ltf['timestamp'], utc=True, errors='coerce')
+    htf = htf.dropna(subset=['timestamp'])
+    ltf = ltf.dropna(subset=['timestamp'])
     htf.set_index('timestamp', inplace=True)
     ltf.set_index('timestamp', inplace=True)
     htf.sort_index(inplace=True)
