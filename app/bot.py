@@ -1322,6 +1322,14 @@ def manage_trade_updates(target_symbol=None):
         state_symbols = list(state.keys())
         cleaned = False
         for s in state_symbols:
+            entry = state.get(s, {})
+            # Only cleanup entries that represent active position-tracking state.
+            # Daily cap bookkeeping (e.g. {"last_trade_date", "daily_trade_count"})
+            # should not be treated as an externally closed position.
+            is_position_tracking_entry = isinstance(entry, dict) and ("virtual_stop" in entry)
+            if not is_position_tracking_entry:
+                continue
+
             if s not in held_symbols:
                 # This was likely closed externally (e.g. Stop Loss hit on Alpaca)
                 print(f"📡 EXTERNAL CLOSE DETECTED: {s} is no longer in positions. Cleaning state.")
