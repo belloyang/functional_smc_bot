@@ -1,10 +1,7 @@
 import pandas as pd
-import numpy as np
-import pandas_ta as ta
 import sys
 import os
-import time
-import requests
+import asyncio
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,55 +10,63 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import (
-    get_strategy_signal, detect_fvg, detect_order_block,
-    calculate_confidence, get_confidence_label, send_discord_notification
+    get_bars, get_strategy_signal, detect_fvg, detect_order_block,
+    get_confidence_label, send_discord_notification
 )
+from app.ibkr_manager import ibkr_mgr
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-def fetch_data(client, symbol, start_time, end_time):
-    """Utility to fetch HTF and LTF data with feed fallback."""
-    feeds = ["sip", "iex"]
-    for feed in feeds:
-        try:
-            htf_req = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-                start=start_time,
-                end=end_time,
-                feed=feed
-            )
-            htf_data = client.get_stock_bars(htf_req).df
-            
-            ltf_req = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                start=start_time,
-                end=end_time,
-                feed=feed
-            )
-            ltf_data = client.get_stock_bars(ltf_req).df
-            
-            if not htf_data.empty and not ltf_data.empty:
-                return htf_data, ltf_data, feed
-        except Exception:
-            continue
-    return None, None, None
+async def fetch_data_ibkr(symbol):
+    """Fetch HTF/LTF via the same IBKR path used by app.bot."""
+    htf_data = await get_bars(symbol, config.TIMEFRAME_HTF, 2000)
+    ltf_data = await get_bars(symbol, config.TIMEFRAME_LTF, 5000)
+    if htf_data.empty or ltf_data.empty:
+        return None, None
+    return htf_data, ltf_data
+
+
+def fetch_data_alpaca(symbol, start_time, end_time):
+    """Fallback historical fetch using Alpaca."""
+    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+    try:
+        htf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            start=start_time,
+            end=end_time,
+            feed="iex"
+        )
+        ltf_req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+            start=start_time,
+            end=end_time,
+            feed="iex"
+        )
+        htf_data = client.get_stock_bars(htf_req).df
+        ltf_data = client.get_stock_bars(ltf_req).df
+        if htf_data.empty or ltf_data.empty:
+            return None, None
+        return htf_data.reset_index(), ltf_data.reset_index()
+    except Exception:
+        return None, None
 
 def process_bars(htf_df, ltf_df):
     """
     Pre-calculate all indicators on the full history to ensure stability.
     """
-    htf = htf_df.reset_index()
-    ltf = ltf_df.reset_index()
+    htf = htf_df.reset_index() if 'timestamp' not in htf_df.columns else htf_df.copy()
+    ltf = ltf_df.reset_index() if 'timestamp' not in ltf_df.columns else ltf_df.copy()
     htf.set_index('timestamp', inplace=True)
     ltf.set_index('timestamp', inplace=True)
     htf.sort_index(inplace=True)
     ltf.sort_index(inplace=True)
     
     # Calculate indicators ONCE on the full history
-    htf['ema50'] = ta.ema(htf['close'], length=50)
+    if 'ema50' not in htf.columns:
+        htf['ema50'] = htf['close'].ewm(span=50, adjust=False).mean()
     
     # LTF indicators
     ltf = detect_fvg(ltf)
@@ -117,9 +122,8 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
         
     return True
 
-def analyze_today_signals(symbol="SPY", min_conf_str="all"):
+async def analyze_today_signals(symbol="SPY", min_conf_str="all", data_source="ibkr"):
     ET = ZoneInfo("US/Eastern")
-    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     reported_signals = {} # To track and dedup signals
     
     # Map confidence choices to numeric thresholds
@@ -152,9 +156,16 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
     end_time_utc = datetime.now(timezone.utc)
     lookback_start_utc = end_time_utc - timedelta(days=14) # 14 days for stable EMA50
     
-    htf_raw, ltf_raw, feed = fetch_data(client, symbol, lookback_start_utc, end_time_utc)
+    htf_raw, ltf_raw = (None, None)
+    if data_source == "ibkr":
+        htf_raw, ltf_raw = await fetch_data_ibkr(symbol)
+        if htf_raw is None:
+            print("⚠️ IBKR data fetch failed. Falling back to Alpaca.")
+            data_source = "alpaca"
+    if data_source == "alpaca":
+        htf_raw, ltf_raw = fetch_data_alpaca(symbol, lookback_start_utc, end_time_utc)
     if htf_raw is None:
-        print("❌ CRITICAL: Could not fetch market data. Check API keys/connection.")
+        print("❌ CRITICAL: Could not fetch market data from IBKR or Alpaca.")
         return
     
     htf_processed, ltf_processed = process_bars(htf_raw, ltf_raw)
@@ -183,14 +194,20 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
                 # Wait for next minute candle to close (plus small buffer)
                 now = datetime.now()
                 sleep_seconds = 61 - now.second
-                # print(f"DEBUG: Sleeping {sleep_seconds}s for next candle...")
-                time.sleep(sleep_seconds)
+                await asyncio.sleep(sleep_seconds)
                 
-                # Fetch latest
-                end_live = datetime.now(timezone.utc)
-                start_live = end_live - timedelta(days=2)
-                
-                h_live, l_live, _ = fetch_data(client, symbol, start_live, end_live)
+                if data_source == "ibkr":
+                    h_live, l_live = await fetch_data_ibkr(symbol)
+                    if h_live is None:
+                        print("⚠️ IBKR live fetch failed. Switching to Alpaca fallback.")
+                        data_source = "alpaca"
+                else:
+                    h_live, l_live = (None, None)
+
+                if data_source == "alpaca" and h_live is None:
+                    end_live = datetime.now(timezone.utc)
+                    start_live = end_live - timedelta(days=14)
+                    h_live, l_live = fetch_data_alpaca(symbol, start_live, end_live)
                 if h_live is None: continue
                 
                 h_proc, l_proc = process_bars(h_live, l_live)
@@ -213,4 +230,14 @@ if __name__ == "__main__":
     parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
     args = parser.parse_args()
-    analyze_today_signals(args.symbol, args.min_conf)
+    async def _run():
+        connected = await ibkr_mgr.connect()
+        source = "ibkr" if connected else "alpaca"
+        if not connected:
+            print("⚠️ Failed to connect to IBKR. Using Alpaca fallback.")
+        try:
+            await analyze_today_signals(args.symbol, args.min_conf, data_source=source)
+        finally:
+            if connected:
+                ibkr_mgr.disconnect()
+    asyncio.run(_run())
