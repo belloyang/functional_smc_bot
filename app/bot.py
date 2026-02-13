@@ -1123,6 +1123,19 @@ async def manage_option_expiry(target_symbol):
                 action = 'SELL' if p.position > 0 else 'BUY'
                 close_order = MarketOrder(action, abs(p.position))
                 ib.placeOrder(contract, close_order)
+                
+                # Notify
+                send_discord_live_trading_notification(
+                    signal="option_expiry_close",
+                    symbol=contract.localSymbol,
+                    order_details={
+                        "Action": action,
+                        "Qty": abs(p.position),
+                        "Reason": "Option Expiring Today"
+                    },
+                    confidence=0,
+                    strategy_bias="neutral"
+                )
             else:
                 days_left = (expiry.date() - now.date()).days
                 print(f"DEBUG: {contract.localSymbol} DTE: {days_left} days - Safe")
@@ -1268,6 +1281,21 @@ async def manage_trade_updates(target_symbol):
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
                     ib.placeOrder(contract, MarketOrder(action, abs(p.position)))
+                    
+                    # Notify
+                    send_discord_live_trading_notification(
+                        signal="stop_loss_close_option",
+                        symbol=contract.localSymbol,
+                        order_details={
+                            "Action": action,
+                            "Qty": abs(p.position),
+                            "Price": curr_price,
+                            "P&L%": f"{pl_pct*100:.2f}%"
+                        },
+                        confidence=0,
+                        strategy_bias="neutral"
+                    )
+                    
                     if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
                 elif pl_pct >= 0.50: # TP 50%
@@ -1275,6 +1303,21 @@ async def manage_trade_updates(target_symbol):
                     ib.reqGlobalCancel()
                     action = 'SELL' if p.position > 0 else 'BUY'
                     ib.placeOrder(contract, MarketOrder(action, abs(p.position)))
+                    
+                    # Notify
+                    send_discord_live_trading_notification(
+                        signal="take_profit_close_option",
+                        symbol=contract.localSymbol,
+                        order_details={
+                            "Action": action,
+                            "Qty": abs(p.position),
+                            "Price": curr_price,
+                            "P&L%": f"{pl_pct*100:.2f}%"
+                        },
+                        confidence=0,
+                        strategy_bias="neutral"
+                    )
+                    
                     if symbol in state: del state[symbol]; save_trade_state(state, symbol)
                     continue
 
