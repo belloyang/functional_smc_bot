@@ -18,11 +18,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import (
-    precompute_strategy_features,
-    get_causal_signal_from_precomputed,
-    get_last_swing_low,
-)
+from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -86,16 +82,13 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print("No LTF data found.")
         return
 
-    # Build strategy features with the same helper used by app.bot.
+    # Build strategy features
     htf_data = htf_data.reset_index()
     ltf_data = ltf_data.reset_index()
-    htf_data, ltf_data = precompute_strategy_features(htf_data, ltf_data)
 
     # Use timestamp index for simulation loop mechanics.
     htf_data = htf_data.set_index('timestamp').sort_index()
     ltf_data = ltf_data.set_index('timestamp').sort_index()
-    htf_signal_data = htf_data.reset_index()
-    ltf_signal_data = ltf_data.reset_index()
     
     # Calculate Historical Volatility (for Options)
     # Annualized Volatility using daily logs of HTF (resampled to daily approx or rolling window)
@@ -182,16 +175,16 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if current_time_utc < simulation_start_time:
             continue
             
-        # Mirror app.bot signal timing:
-        # evaluate on the last fully closed 1m candle, then execute on current bar.
+        # Generate signal using on-demand slicing (matches live trading)
         if i < 1:
             continue
-        eval_ts = ltf_data.index[i - 1]
-        res = get_causal_signal_from_precomputed(
-            htf_signal_data,
-            ltf_signal_data,
-            eval_ts
-        )
+        
+        # Slice data up to current time (like live trading does)
+        htf_slice = htf_data[htf_data.index <= current_time_utc].iloc[-200:]
+        ltf_slice = ltf_data.iloc[max(0, i-200):i+1]
+        
+        # Generate signal (recalculates indicators on slice, matching live behavior)
+        res = get_strategy_signal(htf_slice, ltf_slice)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
 
         # For option revaluation and diagnostics.
@@ -388,11 +381,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         # --- ENTRY LOGIC ---
         if signal == "buy":
+            # 1. HARD BLOCK CHECK (Confidence 0)
+            if confidence <= 0:
+                # print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for BUY")
+                continue
 
             # --- BUY SIGNAL ACTION ---
             # Check confidence threshold and daily cap
             conf_ok = (confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
+            
+            # --- COOL-DOWN CHECK ---
+            if last_loss_exit_time:
+                continue
             
             if position == 0 and in_window and trade_count_ok and conf_ok:
                 # Enter Long (Stock or Call)
@@ -501,10 +502,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     active_trade = None
 
         elif signal == "sell":
+            # 1. HARD BLOCK CHECK (Confidence 0)
+            if confidence <= 0:
+                # print(f"[{current_time_et}] 🛑 SIGNAL BLOCKED: Hard Block (Confidence 0) for SELL")
+                continue
+
             # --- SELL SIGNAL ACTION ---
             # Check confidence threshold and daily cap
             conf_ok = (confidence >= min_conf_val)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
+
+            # --- COOL-DOWN CHECK ---
+            if last_loss_exit_time:
+                continue
             
             if position == 0 and in_window and trade_count_ok and conf_ok:
                 # Enter Short (Options only)
