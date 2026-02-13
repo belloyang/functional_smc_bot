@@ -668,32 +668,60 @@ async def get_best_option_contract(symbol, signal_type, known_price=None):
                 valid_expiries = chain.expirations[:1]
             
         target_expiry = valid_expiries[0]
-        
-        # 5. Pick ATM Strike
-        # Ensure current_price is valid
+
+        # 5. Pick ATM strike candidates and qualify defensively
         if not current_price or current_price <= 0:
             print(f"❌ Cannot determine ATM strike for {symbol} without valid price ({current_price})")
             return None
 
-        target_strike = sorted(chain.strikes, key=lambda x: abs(x - current_price))[0]
         right = 'C' if signal_type == "buy" else 'P'
-        
-        print(f"🎯 Selected Option Setup: {symbol} {target_expiry} ${target_strike} {right} (Class: {chain.tradingClass})")
 
-        # 6. Create and Qualify Contract
-        contract = Option(symbol, target_expiry, target_strike, right, 'SMART')
-        contract.tradingClass = chain.tradingClass # Lock the trading class
-        qualified = await ib.qualifyContractsAsync(contract)
-        
-        if not qualified:
-            print(f"❌ Failed to qualify option contract: {contract.symbol} {target_expiry} {target_strike}")
+        # Keep strikes exactly from IB chain, but normalize float artifacts.
+        strike_candidates = []
+        for s in chain.strikes:
+            try:
+                strike_candidates.append(round(float(s), 2))
+            except Exception:
+                continue
+        strike_candidates = sorted(set(strike_candidates), key=lambda x: abs(x - current_price))
+        if not strike_candidates:
+            print(f"❌ No strike candidates returned by IB chain for {symbol}")
             return None
-            
-        res_contract = qualified[0]
-        # Ensure SMART, but preserve the qualified conId and tradingClass
-        res_contract.exchange = 'SMART'
-        
-        return res_contract
+
+        # Prioritize intended expiry first, then nearby valid expiries as fallback.
+        prioritized_expiries = [target_expiry] + [e for e in valid_expiries if e != target_expiry]
+        # Keep search bounded for latency.
+        prioritized_expiries = prioritized_expiries[:5]
+        strike_candidates = strike_candidates[:40]
+
+        print(
+            f"🎯 Option search setup: symbol={symbol} right={right} "
+            f"price={current_price:.2f} expiry_pref={target_expiry} "
+            f"candidates(exp={len(prioritized_expiries)}, strikes={len(strike_candidates)})"
+        )
+
+        for exp in prioritized_expiries:
+            for strike in strike_candidates:
+                contract = Option(symbol, exp, strike, right, 'SMART')
+                contract.tradingClass = chain.tradingClass
+                try:
+                    qualified = await ib.qualifyContractsAsync(contract)
+                    if qualified:
+                        res_contract = qualified[0]
+                        res_contract.exchange = 'SMART'
+                        print(
+                            f"✅ Qualified option: {res_contract.localSymbol} "
+                            f"(exp={exp}, strike={strike}, class={chain.tradingClass})"
+                        )
+                        return res_contract
+                except Exception:
+                    continue
+
+        print(
+            f"❌ Failed to qualify any contract for {symbol} "
+            f"(right={right}, tradingClass={chain.tradingClass}, price={current_price:.2f})"
+        )
+        return None
 
     except Exception as e:
         print(f"Error getting option contract: {e}")

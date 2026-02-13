@@ -2,4 +2,4 @@ __pycache__/
 .env
 *.png
 backtest-output
-trade_state.json
+trade_state*.json
