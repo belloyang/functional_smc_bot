@@ -618,6 +618,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         # Summary Box
         stats_text = (
+            f"Software Version: v{getattr(config, '__version__', '?.?.?')}\n"
             f"Initial Balance: ${initial_balance:,.2f}\n"
             f"Final Balance: ${balance:,.2f}\n"
             f"Total Return: {final_return_pct:.2f}%\n"
