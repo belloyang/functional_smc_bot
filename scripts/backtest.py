@@ -50,8 +50,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # 1. Fetch Data
     client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
     
-    # Anchor to midnight UTC for reproducibility if no specific date is given
-    end_time = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # End at current UTC time to better reflect live/realtime market state.
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days_back + 20) # Extra data for vol calc
     
     # HTF Data (15 Min)
