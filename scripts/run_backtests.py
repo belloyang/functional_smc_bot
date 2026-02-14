@@ -22,11 +22,24 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from app.config import load_env
 
 
 VALID_MODES = {"stock", "options"}
 
+def load_env(file_path=".env"):
+    """Simple helper to load .env variables without external dependencies."""
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    # Clean up key and value (remove spaces and quotes)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    os.environ[key] = value
 
 @dataclass
 class BacktestJob:
