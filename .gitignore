@@ -1,5 +1,6 @@
 __pycache__/
 .env
 *.png
+backtest-runs/
 backtest-output
 trade_state*.json
