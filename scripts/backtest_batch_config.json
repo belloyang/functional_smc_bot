@@ -1,0 +1,22 @@
+{
+  "output_dir": "backtest-runs/",
+  "symbols": ["SPY", "QQQ"],
+  "days": [30, 90, 365],
+  "balances": [2500, 10000],
+  "modes": ["options", "stock"],
+  "cap": 5,
+  "stock_budget": 0.8,
+  "option_budget": 0.15,
+  "min_conf": "all",
+  "jobs": [
+    {
+      "symbol": "QQQ",
+      "days": 365,
+      "balance": 2500,
+      "mode": "options",
+      "cap": 5,
+      "option_budget": 0.15,
+      "min_conf": "all"
+    }
+  ]
+}
