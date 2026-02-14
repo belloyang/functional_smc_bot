@@ -1,0 +1,9 @@
+{
+  "symbol": "QQQ",
+  "options": true,
+  "cap": 5,
+  "session_duration": 6,
+  "min_conf": "low",
+  "state_file": "trade_state_QQQ.json",
+  "option_budget": 0.15
+}

@@ -1359,10 +1359,9 @@ def manage_trade_updates(target_symbol=None):
 class TradingSession:
     """Manages trading session state and statistics."""
     
-    def __init__(self, duration_hours=None, max_trades=None):
+    def __init__(self, duration_hours=None):
         self.start_time = datetime.now()
         self.duration_hours = duration_hours
-        self.max_trades = max_trades
         self.trades_executed = 0
         self.should_stop = False
         
@@ -1415,11 +1414,6 @@ class TradingSession:
         if self.duration_hours is not None:
             elapsed_hours = (datetime.now() - self.start_time).total_seconds() / 3600
             if elapsed_hours >= self.duration_hours:
-                return False
-                
-        # Check trades limit
-        if self.max_trades is not None:
-            if self.trades_executed >= self.max_trades:
                 return False
                 
         return True
@@ -1532,14 +1526,12 @@ class TradingSession:
                 )
         
         # Limits
-        if self.max_trades or self.duration_hours:
+        if self.duration_hours:
             summary.extend([
                 "",
                 "SESSION LIMITS",
                 "-" * 60,
             ])
-            if self.max_trades:
-                summary.append(f"Trade Limit:     {self.max_trades}")
             if self.duration_hours:
                 summary.append(f"Duration Limit:  {self.duration_hours} hours")
         
@@ -1569,36 +1561,79 @@ def interruptible_sleep(seconds, session):
 
 # ================= MAIN LOOP =================
 
+def _load_runtime_json_config(path):
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            print("❌ Error: runtime config JSON root must be an object.")
+            sys.exit(1)
+        return data
+    except FileNotFoundError:
+        print(f"❌ Error: config file not found: {path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"❌ Error: invalid JSON config: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error reading config file {path}: {e}")
+        sys.exit(1)
+
+
+def _cfg_value(cfg, *keys, default=None):
+    for key in keys:
+        if key in cfg and cfg[key] is not None:
+            return cfg[key]
+    return default
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SMC trading bot.")
-    parser.add_argument("symbol", nargs="?", default=SYMBOL, help="Symbol to trade (default: SPY)")
+    parser.add_argument("symbol", nargs="?", default=None, help="Symbol to trade (default: SPY)")
+    parser.add_argument("--config", type=str, help="Path to runtime JSON config file")
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
-    parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
     parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
     parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
     parser.add_argument("--state-file", type=str, help="Override state file path (default: trade_state_{symbol}.json)")
-    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
+    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default=None, help="Minimum confidence level to take a signal (default: all)")
     
     args = parser.parse_args()
-    target_symbol = args.symbol
-    
+    runtime_cfg = _load_runtime_json_config(args.config)
+
+    target_symbol = (args.symbol or str(_cfg_value(runtime_cfg, "symbol", default=SYMBOL))).upper()
+    enable_options = bool(_cfg_value(runtime_cfg, "options", "enable_options", default=config.ENABLE_OPTIONS))
     if args.options:
         print("Overriding ENABLE_OPTIONS to True from command line.")
-        config.ENABLE_OPTIONS = True
+        enable_options = True
+    config.ENABLE_OPTIONS = enable_options
+
+    # Resolve JSON/CLI settings with CLI taking precedence.
+    stock_budget = args.stock_budget if args.stock_budget is not None else _cfg_value(runtime_cfg, "stock_budget", "stock-budget")
+    option_budget = args.option_budget if args.option_budget is not None else _cfg_value(runtime_cfg, "option_budget", "option-budget")
+    daily_cap = args.cap if args.cap is not None else _cfg_value(runtime_cfg, "cap", "daily_cap", default=5)
+    session_duration = args.session_duration if args.session_duration is not None else _cfg_value(runtime_cfg, "session_duration", "session-duration")
+    state_file = args.state_file if args.state_file is not None else _cfg_value(runtime_cfg, "state_file", "state-file")
+    min_conf = args.min_conf if args.min_conf is not None else _cfg_value(runtime_cfg, "min_conf", "min-conf", default="all")
+    if min_conf not in {"all", "low", "medium", "high"}:
+        print(f"❌ Error: invalid min_conf value '{min_conf}'. Use one of: all, low, medium, high.")
+        sys.exit(1)
+    args.min_conf = min_conf
+    if state_file:
+        args.state_file = str(state_file)
     
     # Validation for budgets
-    if config.ENABLE_OPTIONS and args.stock_budget is not None:
+    if config.ENABLE_OPTIONS and stock_budget is not None:
         print("❌ Error: --stock-budget is only valid in Stock Mode. Use --option-budget for Options Mode.")
         sys.exit(1)
-    if not config.ENABLE_OPTIONS and args.option_budget is not None:
+    if not config.ENABLE_OPTIONS and option_budget is not None:
         print("❌ Error: --option-budget is only valid in Options Mode. Use --stock-budget for Stock Mode.")
         sys.exit(1)
     
     # Handle daily trade cap
-    daily_cap = args.cap if args.cap is not None else 5  # Default to 5
-    
     if daily_cap == 0:
         print("⚠️  WARNING: Daily trade cap is set to 0. No trades will be executed.")
         response = input("Do you want to continue? (yes/no): ")
@@ -1607,7 +1642,7 @@ if __name__ == "__main__":
             sys.exit(0)
     
     # Initialize session
-    session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
+    session = TradingSession(duration_hours=session_duration)
     
     # Setup signal handlers for graceful shutdown
     session.setup_signal_handlers()
@@ -1619,11 +1654,9 @@ if __name__ == "__main__":
         print(f"Daily Trade Cap: 0 (No trades allowed)")
     else:
         print(f"Daily Trade Cap: {daily_cap} trades per day")
-    if args.session_duration:
-        print(f"Session Duration: {args.session_duration} hours")
-    if args.max_trades:
-        print(f"Max Trades: {args.max_trades}")
-    print(f"Min Confidence Filter: {args.min_conf.upper()}")
+    if session_duration:
+        print(f"Session Duration: {session_duration} hours")
+    print(f"Min Confidence Filter: {min_conf.upper()}")
     
     # Map confidence choices to numeric thresholds
     CONF_THRESHOLDS = {
@@ -1632,7 +1665,7 @@ if __name__ == "__main__":
         'medium': 50,
         'high': 80
     }
-    min_conf_threshold = CONF_THRESHOLDS.get(args.min_conf, 0)
+    min_conf_threshold = CONF_THRESHOLDS.get(min_conf, 0)
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
@@ -1711,7 +1744,7 @@ if __name__ == "__main__":
                     sig, conf = res if isinstance(res, tuple) else (res, 0)
                     
                     if conf < min_conf_threshold:
-                        print(f"⚠️  Signal {sig.upper()} detected but SKIPPED (Confidence {conf}% < {args.min_conf.upper()} threshold)")
+                        print(f"⚠️  Signal {sig.upper()} detected but SKIPPED (Confidence {conf}% < {min_conf.upper()} threshold)")
                         # Wait 1 minute and check again
                         interruptible_sleep(60, session)
                         continue
@@ -1725,8 +1758,8 @@ if __name__ == "__main__":
                         confidence=conf,
                         use_daily_cap=use_cap, 
                         daily_cap_value=daily_cap if use_cap else None,
-                        stock_budget_override=args.stock_budget,
-                        option_budget_override=args.option_budget
+                        stock_budget_override=stock_budget,
+                        option_budget_override=option_budget
                     )
                     session.record_trade()
                     # After a trade, sleep for 5 minutes to avoid rapid double-entry
