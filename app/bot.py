@@ -340,10 +340,6 @@ def detect_structure_shift(df):
     # Not fully implemented in causal way for this snippet, relying on simpler OB/Impulse logic
     return df
 
-def liquidity_sweep(df):
-    # Not fully implemented in causal way for this snippet
-    return df
-
 def calculate_confidence(ltf_row, last_htf):
     """Calculates a confidence score between 0-100%."""
     score = 0
@@ -377,9 +373,13 @@ def calculate_confidence(ltf_row, last_htf):
     return int(min(100, score))
 
 def get_confidence_label(score):
-    if score >= 80: return "🔥� High"
+    if score >= 80: return "🔥🔥 High"
     if score >= 50: return "📈 Medium"
     return "⚖️ Low"
+
+def liquidity_sweep(df):
+    # Not fully implemented in causal way for this snippet
+    return df
 
 def send_discord_notification(signal, price, time_et, symbol, bias, confidence):
     webhook_url = getattr(config, 'DISCORD_WEBHOOK_URL', None)
@@ -462,11 +462,11 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     
     # Only calculate EMA if it doesn't exist (prevents drift if already pre-calculated on full history)
     if 'ema50' not in htf.columns:
-        if len(htf) < 50: return None, 0
+        if len(htf) < 50: return None
         htf['ema50'] = ta.ema(htf['close'], length=50)
     
     if htf['ema50'].isnull().all():
-        return None, 0
+        return None
         
     last_htf = htf.iloc[-1]
     bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
@@ -479,7 +479,7 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     if 'is_bull_ob_candle' not in ltf.columns:
         ltf = detect_order_block(ltf)
     
-    if len(ltf) < 5: return None, 0
+    if len(ltf) < 5: return None
     
     # Get last formed candle for signal check
     last_closed = ltf.iloc[-1]
