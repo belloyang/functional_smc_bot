@@ -41,13 +41,16 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, min_conf_val=0):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0):
     if symbol is None:
         symbol = config.SYMBOL
         
     option_allocation_pct = float(option_allocation_pct)
     if option_allocation_pct < 0 or option_allocation_pct > 1:
         raise ValueError("option_allocation_pct must be within [0.0, 1.0]")
+    max_option_contracts = int(max_option_contracts)
+    if max_option_contracts != -1 and max_option_contracts < 1:
+        raise ValueError("max_option_contracts must be -1 (unlimited) or >= 1")
     stock_budget_pct = 1.0 - option_allocation_pct
 
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
@@ -460,7 +463,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     qty_cap = int(total_budget // contract_cost)
                     
                     qty = min(qty_risk, qty_cap)
-                    if qty > 5: qty = 5
+                    if max_option_contracts != -1 and qty > max_option_contracts:
+                        qty = max_option_contracts
                     
                     # Block entry if in cool-down
                     if last_loss_exit_time:
@@ -540,7 +544,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     qty_cap = int(total_budget // contract_cost)
                     
                     qty = min(qty_risk, qty_cap)
-                    if qty > 5: qty = 5
+                    if max_option_contracts != -1 and qty > max_option_contracts:
+                        qty = max_option_contracts
                     
                     # Block entry if in cool-down
                     if last_loss_exit_time:
@@ -700,6 +705,7 @@ if __name__ == "__main__":
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
     parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
+    parser.add_argument("--max-option-contracts", type=int, default=-1, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     
     args = parser.parse_args()
@@ -721,6 +727,9 @@ if __name__ == "__main__":
     if option_allocation < 0 or option_allocation > 1:
         print("❌ Error: --option-allocation must be within [0.0, 1.0].")
         sys.exit(1)
+    if args.max_option_contracts != -1 and args.max_option_contracts < 1:
+        print("❌ Error: --max-option-contracts must be -1 (unlimited) or >= 1.")
+        sys.exit(1)
     
     # Handle confidence thresholds
     CONF_THRESHOLDS = {
@@ -732,4 +741,4 @@ if __name__ == "__main__":
     min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
     
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, option_allocation_pct=option_allocation, min_conf_val=min_conf_val)
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, option_allocation_pct=option_allocation, max_option_contracts=args.max_option_contracts, min_conf_val=min_conf_val)

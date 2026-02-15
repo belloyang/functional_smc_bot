@@ -5,5 +5,6 @@
   "session_duration": 6,
   "min_conf": "low",
   "state_file": "trade_state_QQQ.json",
-  "option_allocation": 0.15
+  "option_allocation": 0.15,
+  "max_option_contracts": -1
 }

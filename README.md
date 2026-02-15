@@ -56,6 +56,7 @@ Common params:
 - `--options`
 - `--cap`
 - `--option-allocation` (stock allocation is `1 - option-allocation`)
+- `--max-option-contracts` (`-1` for unlimited, default)
 - `--min-conf` (`all|low|medium|high`)
 
 ## Run batch backtests
@@ -103,6 +104,7 @@ Supported runtime JSON keys:
 - `cap` or `daily_cap`
 - `session_duration` or `session-duration`
 - `option_allocation` or `option-allocation` (stock allocation is `1 - option-allocation`)
+- `max_option_contracts` or `max-option-contracts` (`-1` for unlimited)
 - `state_file` or `state-file`
 - `min_conf` (`all|low|medium|high`)
 

@@ -569,7 +569,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None):
+def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None, max_option_contracts_override=None):
     # Determine bias for notifications
     bias = "bullish" if signal == "buy" else "bearish"
 
@@ -637,6 +637,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     option_allocation_pct = option_allocation_override if option_allocation_override is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
     option_allocation_pct = min(1.0, max(0.0, float(option_allocation_pct)))
     stock_allocation_pct = 1.0 - option_allocation_pct
+    max_option_contracts = max_option_contracts_override if max_option_contracts_override is not None else getattr(config, 'MAX_OPTION_CONTRACTS', -1)
     
     # 1. Fetch CURRENT state for the base symbol and all related contracts
     all_positions = []
@@ -813,9 +814,9 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 qty_cap = int(available_budget // cost_per_contract)
                 
                 qty = min(qty_risk, qty_cap)
-                if qty > 5:
-                    print(f"DEBUG: Capping contracts from {qty} to 5.")
-                    qty = 5
+                if max_option_contracts != -1 and qty > max_option_contracts:
+                    print(f"DEBUG: Capping contracts from {qty} to {max_option_contracts}.")
+                    qty = max_option_contracts
                     
                 if qty < 1:
                     print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
@@ -1602,6 +1603,7 @@ if __name__ == "__main__":
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
     parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
+    parser.add_argument("--max-option-contracts", type=int, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--state-file", type=str, help="Override state file path (default: trade_state_{symbol}.json)")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default=None, help="Minimum confidence level to take a signal (default: all)")
     
@@ -1624,6 +1626,11 @@ if __name__ == "__main__":
         print("❌ Error: option allocation must be within [0.0, 1.0].")
         sys.exit(1)
     stock_allocation = 1.0 - option_allocation
+    max_option_contracts = args.max_option_contracts if args.max_option_contracts is not None else _cfg_value(runtime_cfg, "max_option_contracts", "max-option-contracts", default=getattr(config, "MAX_OPTION_CONTRACTS", -1))
+    max_option_contracts = int(max_option_contracts)
+    if max_option_contracts != -1 and max_option_contracts < 1:
+        print("❌ Error: max option contracts must be -1 (unlimited) or >= 1.")
+        sys.exit(1)
 
     daily_cap = args.cap if args.cap is not None else _cfg_value(runtime_cfg, "cap", "daily_cap", default=5)
     session_duration = args.session_duration if args.session_duration is not None else _cfg_value(runtime_cfg, "session_duration", "session-duration")
@@ -1658,6 +1665,7 @@ if __name__ == "__main__":
     else:
         print(f"Daily Trade Cap: {daily_cap} trades per day")
     print(f"Option Allocation: {option_allocation:.2f} | Stock Allocation: {stock_allocation:.2f}")
+    print(f"Max Option Contracts/Trade: {'Unlimited' if max_option_contracts == -1 else max_option_contracts}")
     if session_duration:
         print(f"Session Duration: {session_duration} hours")
     print(f"Min Confidence Filter: {min_conf.upper()}")
@@ -1762,7 +1770,8 @@ if __name__ == "__main__":
                         confidence=conf,
                         use_daily_cap=use_cap, 
                         daily_cap_value=daily_cap if use_cap else None,
-                        option_allocation_override=option_allocation
+                        option_allocation_override=option_allocation,
+                        max_option_contracts_override=max_option_contracts
                     )
                     session.record_trade()
                     # After a trade, sleep for 5 minutes to avoid rapid double-entry
