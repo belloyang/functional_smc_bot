@@ -567,7 +567,7 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
-def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None):
     # Determine bias for notifications
     bias = "bullish" if signal == "buy" else "bearish"
 
@@ -766,8 +766,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
-                if option_budget_override is not None:
-                    budget_pct = option_budget_override
+                if option_allocation_override is not None:
+                    budget_pct = option_allocation_override
                 else:
                     budget_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
                 total_budget = equity * budget_pct
@@ -784,8 +784,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 global_option_remaining = total_budget - existing_option_exposure
                 
                 # 2. Ticker-Specific Option Exposure Check
-                if option_budget_override is not None:
-                     max_ticker_option_pct = option_budget_override
+                if option_allocation_override is not None:
+                     max_ticker_option_pct = option_allocation_override
                 else:
                      max_ticker_option_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
                 
@@ -885,7 +885,11 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             tp_price = price + (risk_dist * 2.5)
             
             # 1.3 Calculate Quantity
-            qty = calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
+            if option_allocation_override is not None:
+                stock_allocation = 1.0 - option_allocation_override
+            else:
+                stock_allocation = 1.0 - float(getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20))
+            qty = calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_allocation)
             if qty <= 0:
                 print("Calculated Quantity is 0, skipping trade.")
                 return
@@ -1596,8 +1600,7 @@ if __name__ == "__main__":
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
-    parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
-    parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
     parser.add_argument("--state-file", type=str, help="Override state file path (default: trade_state_{symbol}.json)")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default=None, help="Minimum confidence level to take a signal (default: all)")
     
@@ -1612,8 +1615,15 @@ if __name__ == "__main__":
     config.ENABLE_OPTIONS = enable_options
 
     # Resolve JSON/CLI settings with CLI taking precedence.
-    stock_budget = args.stock_budget if args.stock_budget is not None else _cfg_value(runtime_cfg, "stock_budget", "stock-budget")
-    option_budget = args.option_budget if args.option_budget is not None else _cfg_value(runtime_cfg, "option_budget", "option-budget")
+    option_allocation = args.option_allocation if args.option_allocation is not None else _cfg_value(runtime_cfg, "option_allocation", "option-allocation")
+    if option_allocation is None:
+        option_allocation = float(getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20))
+    option_allocation = float(option_allocation)
+    if option_allocation < 0 or option_allocation > 1:
+        print("❌ Error: option allocation must be within [0.0, 1.0].")
+        sys.exit(1)
+    stock_allocation = 1.0 - option_allocation
+
     daily_cap = args.cap if args.cap is not None else _cfg_value(runtime_cfg, "cap", "daily_cap", default=5)
     session_duration = args.session_duration if args.session_duration is not None else _cfg_value(runtime_cfg, "session_duration", "session-duration")
     state_file = args.state_file if args.state_file is not None else _cfg_value(runtime_cfg, "state_file", "state-file")
@@ -1624,14 +1634,6 @@ if __name__ == "__main__":
     args.min_conf = min_conf
     if state_file:
         args.state_file = str(state_file)
-    
-    # Validation for budgets
-    if config.ENABLE_OPTIONS and stock_budget is not None:
-        print("❌ Error: --stock-budget is only valid in Stock Mode. Use --option-budget for Options Mode.")
-        sys.exit(1)
-    if not config.ENABLE_OPTIONS and option_budget is not None:
-        print("❌ Error: --option-budget is only valid in Options Mode. Use --stock-budget for Stock Mode.")
-        sys.exit(1)
     
     # Handle daily trade cap
     if daily_cap == 0:
@@ -1654,6 +1656,7 @@ if __name__ == "__main__":
         print(f"Daily Trade Cap: 0 (No trades allowed)")
     else:
         print(f"Daily Trade Cap: {daily_cap} trades per day")
+    print(f"Option Allocation: {option_allocation:.2f} | Stock Allocation: {stock_allocation:.2f}")
     if session_duration:
         print(f"Session Duration: {session_duration} hours")
     print(f"Min Confidence Filter: {min_conf.upper()}")
@@ -1758,8 +1761,7 @@ if __name__ == "__main__":
                         confidence=conf,
                         use_daily_cap=use_cap, 
                         daily_cap_value=daily_cap if use_cap else None,
-                        stock_budget_override=stock_budget,
-                        option_budget_override=option_budget
+                        option_allocation_override=option_allocation
                     )
                     session.record_trade()
                     # After a trade, sleep for 5 minutes to avoid rapid double-entry

@@ -41,10 +41,15 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, stock_budget_pct=0.80, option_budget_pct=0.20, min_conf_val=0):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, min_conf_val=0):
     if symbol is None:
         symbol = config.SYMBOL
         
+    option_allocation_pct = float(option_allocation_pct)
+    if option_allocation_pct < 0 or option_allocation_pct > 1:
+        raise ValueError("option_allocation_pct must be within [0.0, 1.0]")
+    stock_budget_pct = 1.0 - option_allocation_pct
+
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
     
     # 1. Fetch Data
@@ -444,7 +449,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
 
-                    total_budget = balance * option_budget_pct
+                    total_budget = balance * option_allocation_pct
                     current_risk_target = balance * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
@@ -525,7 +530,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
 
-                    total_budget = balance * option_budget_pct
+                    total_budget = balance * option_allocation_pct
                     current_risk_target = balance * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
@@ -694,8 +699,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=30, help="Number of days to backtest (default: 30)")
     parser.add_argument("--balance", type=float, default=10000.0, help="Initial account balance (default: 10000)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, positive for max trades per day (default: 5)")
-    parser.add_argument("--stock-budget", type=float, help="Percentage of balance to use for per-trade stock allocation (default: 0.80 for 80%%)")
-    parser.add_argument("--option-budget", type=float, help="Percentage of balance to use for per-trade option allocation (default: 0.20 for 20%%)")
+    parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     
     args = parser.parse_args()
@@ -712,9 +716,11 @@ if __name__ == "__main__":
         use_daily_cap = True  # Default behavior
         daily_cap_value = 5
     
-    # Handle budgets
-    stock_budget = args.stock_budget if args.stock_budget is not None else getattr(config, 'STOCK_ALLOCATION_PCT', 0.80)
-    option_budget = args.option_budget if args.option_budget is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_allocation = args.option_allocation if args.option_allocation is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_allocation = float(option_allocation)
+    if option_allocation < 0 or option_allocation > 1:
+        print("❌ Error: --option-allocation must be within [0.0, 1.0].")
+        sys.exit(1)
     
     # Handle confidence thresholds
     CONF_THRESHOLDS = {
@@ -726,4 +732,4 @@ if __name__ == "__main__":
     min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
     
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, stock_budget_pct=stock_budget, option_budget_pct=option_budget, min_conf_val=min_conf_val)
+    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, option_allocation_pct=option_allocation, min_conf_val=min_conf_val)

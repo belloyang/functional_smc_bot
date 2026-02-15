@@ -7,7 +7,7 @@ Trading and backtesting bot for US stocks/options with SMC-style signal logic.
 - Backtest engine using the same strategy functions as the live bot
 - Runtime bot config via JSON file (`--config`)
 - Batch backtest runner with config-driven `jobs`
-- Risk controls: daily trade cap, allocation budgets, confidence filter, session limits
+- Risk controls: daily trade cap, option allocation, confidence filter, session limits
 
 ## Prerequisites
 - Python 3.12
@@ -35,7 +35,6 @@ Important:
 
 ## Global defaults
 You can adjust defaults in `app/config.py`:
-- `STOCK_ALLOCATION_PCT`
 - `OPTIONS_ALLOCATION_PCT`
 - `DEFAULT_DAILY_CAP`
 - `RISK_PER_TRADE`
@@ -56,8 +55,7 @@ Common params:
 - `--balance`
 - `--options`
 - `--cap`
-- `--stock-budget`
-- `--option-budget`
+- `--option-allocation` (stock allocation is `1 - option-allocation`)
 - `--min-conf` (`all|low|medium|high`)
 
 ## Run batch backtests
@@ -104,15 +102,14 @@ Supported runtime JSON keys:
 - `options` or `enable_options`
 - `cap` or `daily_cap`
 - `session_duration` or `session-duration`
-- `stock_budget` or `stock-budget`
-- `option_budget` or `option-budget`
+- `option_allocation` or `option-allocation` (stock allocation is `1 - option-allocation`)
 - `state_file` or `state-file`
 - `min_conf` (`all|low|medium|high`)
 
 ## Multi-instance example
 ```bash
-python3.12 -m app.bot SPY --stock-budget 0.40 &
-python3.12 -m app.bot QQQ --stock-budget 0.40 &
+python3.12 -m app.bot SPY --option-allocation 0.60 &
+python3.12 -m app.bot QQQ --option-allocation 0.60 &
 ```
 
 ## Graceful shutdown

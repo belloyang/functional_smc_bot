@@ -48,8 +48,7 @@ class BacktestJob:
     balance: float
     mode: str
     cap: int | None = None
-    stock_budget: float | None = None
-    option_budget: float | None = None
+    option_allocation: float | None = None
     min_conf: str | None = None
 
     def id_slug(self) -> str:
@@ -92,11 +91,13 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
                     balance=float(j.get("balance", common.get("balance", 10000))),
                     mode=mode,
                     cap=(None if j.get("cap", common.get("cap")) is None else int(j.get("cap", common.get("cap")))),
-                    stock_budget=(None if j.get("stock_budget", common.get("stock_budget")) is None else float(j.get("stock_budget", common.get("stock_budget")))),
-                    option_budget=(None if j.get("option_budget", common.get("option_budget")) is None else float(j.get("option_budget", common.get("option_budget")))),
+                    option_allocation=(None if j.get("option_allocation", common.get("option_allocation")) is None else float(j.get("option_allocation", common.get("option_allocation")))),
                     min_conf=(None if j.get("min_conf", common.get("min_conf")) is None else str(j.get("min_conf", common.get("min_conf")))),
                 )
             )
+        for job in jobs:
+            if job.option_allocation is not None and not (0.0 <= job.option_allocation <= 1.0):
+                raise ValueError("option_allocation must be within [0.0, 1.0]")
         return jobs
 
     # CLI/config cartesian mode
@@ -110,8 +111,7 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
             raise ValueError(f"Invalid mode: {m}. Use one of {sorted(VALID_MODES)}")
 
     cap = args.cap if args.cap is not None else cfg.get("cap")
-    stock_budget = args.stock_budget if args.stock_budget is not None else cfg.get("stock_budget")
-    option_budget = args.option_budget if args.option_budget is not None else cfg.get("option_budget")
+    option_allocation = args.option_allocation if args.option_allocation is not None else cfg.get("option_allocation")
     min_conf = args.min_conf if args.min_conf is not None else cfg.get("min_conf")
 
     for symbol, day, bal, mode in itertools.product(symbols, days, balances, modes):
@@ -122,12 +122,14 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
                 balance=float(bal),
                 mode=mode,
                 cap=(None if cap is None else int(cap)),
-                stock_budget=(None if stock_budget is None else float(stock_budget)),
-                option_budget=(None if option_budget is None else float(option_budget)),
+                option_allocation=(None if option_allocation is None else float(option_allocation)),
                 min_conf=(None if min_conf is None else str(min_conf)),
             )
         )
 
+    for job in jobs:
+        if job.option_allocation is not None and not (0.0 <= job.option_allocation <= 1.0):
+            raise ValueError("option_allocation must be within [0.0, 1.0]")
     return jobs
 
 
@@ -139,10 +141,8 @@ def build_command(python_bin: str, backtest_script: Path, job: BacktestJob) -> l
 
     if job.cap is not None:
         cmd.extend(["--cap", str(job.cap)])
-    if job.stock_budget is not None:
-        cmd.extend(["--stock-budget", str(job.stock_budget)])
-    if job.option_budget is not None:
-        cmd.extend(["--option-budget", str(job.option_budget)])
+    if job.option_allocation is not None:
+        cmd.extend(["--option-allocation", str(job.option_allocation)])
     if job.min_conf is not None:
         cmd.extend(["--min-conf", str(job.min_conf)])
 
@@ -159,8 +159,7 @@ def main() -> int:
     parser.add_argument("--balances", type=str, help="CSV initial balances, e.g. 2500,10000")
     parser.add_argument("--modes", type=str, help="CSV modes: stock,options")
     parser.add_argument("--cap", type=int, help="Daily trade cap (-1 for unlimited)")
-    parser.add_argument("--stock-budget", type=float, help="Override stock allocation pct")
-    parser.add_argument("--option-budget", type=float, help="Override option allocation pct")
+    parser.add_argument("--option-allocation", type=float, help="Fraction of balance reserved for options (0.0 to 1.0)")
     parser.add_argument("--min-conf", type=str, choices=["all", "low", "medium", "high"], help="Signal confidence filter")
     parser.add_argument("--output-dir", type=str, help="Dedicated folder for this batch run")
     parser.add_argument("--python-bin", type=str, default="python3.12", help="Python binary for backtest command")
