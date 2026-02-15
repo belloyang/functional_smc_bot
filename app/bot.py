@@ -432,7 +432,7 @@ def generate_signal(symbol=None):
 
 from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
 
-def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None):
+def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None, risk_allocation_pct=None):
     """
     Calculates position size based on:
     1. Risk Amount (1% of Equity)
@@ -448,7 +448,9 @@ def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=Non
         equity = 10000.0
         buying_power = 10000.0
         
-    risk_amount = equity * RISK_PER_TRADE
+    alloc_risk_pct = 1.0 if risk_allocation_pct is None else float(risk_allocation_pct)
+    alloc_risk_pct = min(1.0, max(0.0, alloc_risk_pct))
+    risk_amount = equity * alloc_risk_pct * RISK_PER_TRADE
     stop_distance = abs(price - stop_loss_price)
     
     if stop_distance <= 0:
@@ -487,7 +489,7 @@ def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=Non
     qty = int(min(qty_risk, qty_ticker, qty_bp))
     
     # Log
-    print(f"DEBUG: Equity: ${equity:.2f} | Risk($): ${risk_amount:.2f} | Entry: {price} | SL: {stop_loss_price} | Dist: {stop_distance:.2f}")
+    print(f"DEBUG: Equity: ${equity:.2f} | RiskAlloc: {alloc_risk_pct:.2f} | Risk($): ${risk_amount:.2f} | Entry: {price} | SL: {stop_loss_price} | Dist: {stop_distance:.2f}")
     print(f"DEBUG: RiskQty: {int(qty_risk)} | BPQty: {int(qty_bp)} -> Final: {qty}")
     
     return max(0, qty)
@@ -632,6 +634,9 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     
     price = price_df['close'].iloc[-1]
     last_close = price # Current price estimate
+    option_allocation_pct = option_allocation_override if option_allocation_override is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_allocation_pct = min(1.0, max(0.0, float(option_allocation_pct)))
+    stock_allocation_pct = 1.0 - option_allocation_pct
     
     # 1. Fetch CURRENT state for the base symbol and all related contracts
     all_positions = []
@@ -766,10 +771,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
-                if option_allocation_override is not None:
-                    budget_pct = option_allocation_override
-                else:
-                    budget_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+                budget_pct = option_allocation_pct
                 total_budget = equity * budget_pct
                 
                 # Fetch all current positions to sum exposure
@@ -784,10 +786,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 global_option_remaining = total_budget - existing_option_exposure
                 
                 # 2. Ticker-Specific Option Exposure Check
-                if option_allocation_override is not None:
-                     max_ticker_option_pct = option_allocation_override
-                else:
-                     max_ticker_option_pct = getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+                max_ticker_option_pct = option_allocation_pct
                 
                 max_ticker_option_amt = equity * max_ticker_option_pct
                 ticker_option_exposure = 0.0
@@ -805,8 +804,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                     print(f"⚠️ WARNING: Insufficient Budget for {symbol} option. Global Remain: ${global_option_remaining:.2f}, Ticker Remain: ${ticker_remaining:.2f}. Need ${cost_per_contract:.2f}. Skipping.")
                     return
                 
-                # 3. Risk-Based Position Sizing (Max 2% equity risk per trade)
-                current_risk_target = equity * 0.02  # Risk 2% of total equity
+                # 3. Risk-Based Position Sizing (mode allocation aware)
+                current_risk_target = equity * option_allocation_pct * RISK_PER_TRADE
                 risk_per_contract = entry_est * 0.20 * 100  # 20% SL on premium
                 qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
                 
@@ -885,11 +884,13 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             tp_price = price + (risk_dist * 2.5)
             
             # 1.3 Calculate Quantity
-            if option_allocation_override is not None:
-                stock_allocation = 1.0 - option_allocation_override
-            else:
-                stock_allocation = 1.0 - float(getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20))
-            qty = calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_allocation)
+            qty = calculate_smart_quantity(
+                symbol,
+                price,
+                sl_price,
+                budget_override=stock_allocation_pct,
+                risk_allocation_pct=stock_allocation_pct
+            )
             if qty <= 0:
                 print("Calculated Quantity is 0, skipping trade.")
                 return

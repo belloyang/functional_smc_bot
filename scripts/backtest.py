@@ -413,8 +413,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     risk_dist = price - sl
                     tp = price + (risk_dist * 2.5)
                     
-                    # Calculate Qty based on Risk (1% of balance)
-                    risk_amt = balance * 0.01
+                    # Calculate Qty based on allocation-aware risk
+                    risk_amt = balance * stock_budget_pct * config.RISK_PER_TRADE
                     qty_risk = int(risk_amt / risk_dist) if risk_dist > 0 else 0
                     
                     # Capped by Stock Allocation (e.g. 40%)
@@ -450,7 +450,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
-                    current_risk_target = balance * config.RISK_PER_TRADE
+                    current_risk_target = balance * option_allocation_pct * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100
@@ -531,7 +531,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
-                    current_risk_target = balance * config.RISK_PER_TRADE
+                    current_risk_target = balance * option_allocation_pct * config.RISK_PER_TRADE
                     
                     # Risk per contract is 20% premium (our SL)
                     risk_per_contract = premium * 0.20 * 100

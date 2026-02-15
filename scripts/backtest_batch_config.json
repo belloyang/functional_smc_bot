@@ -14,7 +14,7 @@
       "balance": 2500,
       "mode": "options",
       "cap": 5,
-      "option_allocation": 0.15,
+      "option_allocation": 1.0,
       "min_conf": "all"
     }
   ]

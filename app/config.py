@@ -36,7 +36,7 @@ TIMEFRAME_LTF = "1Min"
 # Note: TradingClient will fail if keys are None, but we catch it here
 trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
 
-RISK_PER_TRADE = 0.02  # 2%
+RISK_PER_TRADE = 0.02  # 2% 
 try:
     ACCOUNT_BALANCE = trading_client.get_account().equity
 except Exception:

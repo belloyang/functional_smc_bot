@@ -37,7 +37,7 @@ Important:
 You can adjust defaults in `app/config.py`:
 - `OPTIONS_ALLOCATION_PCT`
 - `DEFAULT_DAILY_CAP`
-- `RISK_PER_TRADE`
+- `RISK_PER_TRADE` (default `0.01`, i.e. 1%)
 
 ## Run backtest
 Stock mode:
