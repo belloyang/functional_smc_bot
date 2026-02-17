@@ -18,7 +18,12 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
-from app.bot import get_strategy_signal, get_last_swing_low, get_last_swing_high
+from app.bot import (
+    get_last_swing_low,
+    get_last_swing_high,
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
+)
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -90,13 +95,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print("No LTF data found.")
         return
 
-    # Build strategy features
+    # Prepare bars and precompute strategy features once (same causal path as live bot)
     htf_data = htf_data.reset_index()
     ltf_data = ltf_data.reset_index()
 
-    # Use timestamp index for simulation loop mechanics.
+    # Use index temporarily for volatility calc.
     htf_data = htf_data.set_index('timestamp').sort_index()
-    ltf_data = ltf_data.set_index('timestamp').sort_index()
     
     # Calculate Historical Volatility (for Options)
     # Annualized Volatility using daily logs of HTF (resampled to daily approx or rolling window)
@@ -111,6 +115,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # 50-period rolling std dev of log returns * sqrt(6552)
     htf_data['volatility'] = htf_data['log_ret'].rolling(window=50).std() * math.sqrt(252 * 26)
     htf_data['volatility'] = htf_data['volatility'].fillna(0.20) # Default 20%
+
+    # Precompute signal features on full history to mirror live-bot signal evaluation.
+    htf_data = htf_data.reset_index()
+    htf_precomputed, ltf_precomputed = precompute_strategy_features(htf_data, ltf_data)
+
+    # Use timestamp index for simulation loop mechanics.
+    htf_data = htf_precomputed.set_index('timestamp').sort_index()
+    ltf_data = ltf_precomputed.set_index('timestamp').sort_index()
 
     print(f"Data loaded. HTF: {len(htf_data)} bars, LTF: {len(ltf_data)} bars.")
 
@@ -130,6 +142,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     daily_trade_count = 0
     last_trade_date = None
     last_exit_time = None # New: Track cool-down
+    next_entry_allowed_time = None # Mirror live bot: wait 5 minutes after each entry
     day_starting_balance = initial_balance # Initialize for the first day
     current_equity = initial_balance       # Initialize for first bar
     daily_stop_hit = False # Initialize for the first day
@@ -183,16 +196,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if current_time_utc < simulation_start_time:
             continue
             
-        # Generate signal using on-demand slicing (matches live trading)
-        if i < 1:
-            continue
-        
-        # Slice data up to current time (like live trading does)
-        htf_slice = htf_data[htf_data.index <= current_time_utc].iloc[-200:]
-        ltf_slice = ltf_data.iloc[max(0, i-200):i+1]
-        
-        # Generate signal (recalculates indicators on slice, matching live behavior)
-        res = get_strategy_signal(htf_slice, ltf_slice)
+        # Generate signal using the same causal helper as live bot.
+        res = get_causal_signal_from_precomputed(htf_precomputed, ltf_precomputed, current_time_utc, ltf_window=200)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
 
         # For option revaluation and diagnostics.
@@ -403,7 +408,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if last_loss_exit_time:
                 continue
             
-            if position == 0 and in_window and trade_count_ok and conf_ok:
+            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -443,6 +449,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                         trades.append({'time': current_time_et, 'type': 'buy_stock', 'price': price, 'qty': qty, 'sl': sl, 'tp': tp})
                         print(f"[{current_time_et}] BUY STOCK @ {price:.2f} | Qty: {qty} | SL: {sl:.2f} | TP: {tp:.2f}")
+                        next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
                 elif trade_type == "options":
                     strike = round(price)
@@ -489,6 +496,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                         trades.append({'time': current_time_et, 'type': 'buy_call', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY CALL  @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                        next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
             elif position < 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'put'):
                 # Exit Bearish Position due to Bullish Signal Flip
@@ -525,7 +533,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if last_loss_exit_time:
                 continue
             
-            if position == 0 and in_window and trade_count_ok and conf_ok:
+            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -569,6 +578,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         }
                         trades.append({'time': current_time_et, 'type': 'buy_put', 'price': premium, 'qty': qty, 'strike': strike})
                         print(f"[{current_time_et}] BUY PUT   @ {premium:.2f} (Qty: {qty}, Strk: {strike}) | SL: {active_trade['stop_loss']:.2f} | TP: {active_trade['take_profit']:.2f}")
+                        next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
             elif position > 0 or (trade_type == "options" and active_trade and active_trade['type'] == 'call'):
                 # Exit Bullish Position due to Bearish Signal Flip
