@@ -55,6 +55,10 @@ OPTIONS_ALLOCATION_PCT = 0.15 # Max 15% of equity for all option premiums (Globa
 MAX_OPTION_CONTRACTS = -1     # -1 means no explicit contract-count cap
 DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
 
+# --- DRAWDOWN & BEHAVIORAL SAFETY ---
+MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from peak
+COOL_DOWN_MINUTES = 15        # Wait period after any losing trade
+
 # --- NOTIFICATIONS ---
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")

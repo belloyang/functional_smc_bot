@@ -621,8 +621,15 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             time_held = last_time_utc - active_trade['entry_time']
             days_passed = time_held.total_seconds() / (24 * 3600)
             T_remain = max(0, (active_trade['expiry_days'] - days_passed) / 365.0)
-            # Use last available volatility
-            sigma = htf_data.iloc[-1]['volatility']
+            
+            # Fix: Use volatility from the last processed timestamp (index), not the end of the dataset
+            # htf_data uses timestamp as index
+            match_row = htf_data[htf_data.index <= last_time_utc]
+            if not match_row.empty:
+                 sigma = match_row.iloc[-1]['volatility']
+            else:
+                 sigma = 0.20 # Fallback
+            
             exit_premium = black_scholes_price(last_price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
             pnl = (exit_premium - entry_price) * 100 * abs(position)
             balance += exit_premium * 100 * abs(position)
