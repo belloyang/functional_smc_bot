@@ -49,7 +49,7 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
 def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0):
     if symbol is None:
         symbol = config.SYMBOL
-
+        
     option_allocation_pct = float(option_allocation_pct)
     if option_allocation_pct < 0 or option_allocation_pct > 1:
         raise ValueError("option_allocation_pct must be within [0.0, 1.0]")
@@ -57,7 +57,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     if max_option_contracts != -1 and max_option_contracts < 1:
         raise ValueError("max_option_contracts must be -1 (unlimited) or >= 1")
     stock_budget_pct = 1.0 - option_allocation_pct
-        
+
     print(f"Starting backtest for {symbol} over last {days_back} days (Type: {trade_type})...")
     
     # 1. Fetch Data
@@ -95,13 +95,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print("No LTF data found.")
         return
 
-    # Build features once on full history (mirror app.bot causal helpers)
+    # Prepare bars and precompute strategy features once (same causal path as live bot)
     htf_data = htf_data.reset_index()
     ltf_data = ltf_data.reset_index()
 
-    # Use timestamp index for simulation loop mechanics.
+    # Use index temporarily for volatility calc.
     htf_data = htf_data.set_index('timestamp').sort_index()
-    ltf_data = ltf_data.set_index('timestamp').sort_index()
     
     # Calculate Historical Volatility (for Options)
     # Annualized Volatility using daily logs of HTF (resampled to daily approx or rolling window)
@@ -117,11 +116,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     htf_data['volatility'] = htf_data['log_ret'].rolling(window=50).std() * math.sqrt(252 * 26)
     htf_data['volatility'] = htf_data['volatility'].fillna(0.20) # Default 20%
 
-    # Precompute strategy features and normalize timestamps (same helper as app.bot)
+    # Precompute signal features on full history to mirror live-bot signal evaluation.
     htf_data = htf_data.reset_index()
     htf_precomputed, ltf_precomputed = precompute_strategy_features(htf_data, ltf_data)
 
-    # Use timestamp index for loop mechanics
+    # Use timestamp index for simulation loop mechanics.
     htf_data = htf_precomputed.set_index('timestamp').sort_index()
     ltf_data = ltf_precomputed.set_index('timestamp').sort_index()
 
@@ -143,7 +142,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     daily_trade_count = 0
     last_trade_date = None
     last_exit_time = None # New: Track cool-down
-    next_entry_allowed_time = None # Mirror app.bot main loop 5m post-entry cooldown
+    next_entry_allowed_time = None # Mirror live bot: wait 5 minutes after each entry
     day_starting_balance = initial_balance # Initialize for the first day
     current_equity = initial_balance       # Initialize for first bar
     daily_stop_hit = False # Initialize for the first day
@@ -197,7 +196,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         if current_time_utc < simulation_start_time:
             continue
             
-        # Generate signal with the same causal helper used by app.bot
+        # Generate signal using the same causal helper as live bot.
         res = get_causal_signal_from_precomputed(htf_precomputed, ltf_precomputed, current_time_utc, ltf_window=200)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
 
@@ -408,8 +407,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             # --- COOL-DOWN CHECK ---
             if last_loss_exit_time:
                 continue
-            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
             
+            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
             if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
@@ -423,7 +422,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     risk_dist = price - sl
                     tp = price + (risk_dist * 2.5)
                     
-                    # Allocation-aware risk (same semantics as app.bot)
+                    # Calculate Qty based on allocation-aware risk
                     risk_amt = balance * stock_budget_pct * config.RISK_PER_TRADE
                     qty_risk = int(risk_amt / risk_dist) if risk_dist > 0 else 0
                     
@@ -533,8 +532,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             # --- COOL-DOWN CHECK ---
             if last_loss_exit_time:
                 continue
-            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
             
+            can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
             if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
                 # Enter Short (Options only)
                 if trade_type == "options":

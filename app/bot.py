@@ -497,7 +497,7 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
              signal = "sell"
 
     if signal:
-        confidence = calculate_confidence(last_closed, last_htf)
+        confidence = calculate_confidence(last_closed, htf.iloc[-1])
 
     return signal, confidence
 
