@@ -501,6 +501,60 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
 
     return signal, confidence
 
+
+def _normalize_timestamp_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a UTC `timestamp` column exists for stable causal slicing."""
+    out = df.copy()
+    if 'timestamp' not in out.columns:
+        out = out.reset_index()
+
+    out['timestamp'] = pd.to_datetime(out['timestamp'], utc=True, errors='coerce')
+    out = out.dropna(subset=['timestamp'])
+    out = out.sort_values('timestamp').reset_index(drop=True)
+    return out
+
+
+def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
+    """Compute strategy features once on full history to avoid signal drift."""
+    htf = _normalize_timestamp_frame(htf_df)
+    ltf = _normalize_timestamp_frame(ltf_df)
+
+    if 'ema50' not in htf.columns:
+        htf['ema50'] = ta.ema(htf['close'], length=50)
+
+    if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
+        ltf = detect_fvg(ltf)
+    if 'is_bull_ob_candle' not in ltf.columns or 'is_bear_ob_candle' not in ltf.columns:
+        ltf = detect_order_block(ltf)
+
+    return htf, ltf
+
+
+def get_causal_signal_from_precomputed(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, evaluation_ts, ltf_window: int = 200):
+    """
+    Evaluate signal at a specific closed 1m candle timestamp.
+    Uses only 15m candles that were already closed at that timestamp.
+    """
+    if evaluation_ts is None:
+        return None
+
+    ts = pd.Timestamp(evaluation_ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+
+    ltf_causal = ltf_df[ltf_df['timestamp'] <= ts]
+    if ltf_causal.empty:
+        return None
+
+    htf_causal = htf_df[htf_df['timestamp'] <= (ts - timedelta(minutes=15))]
+    if htf_causal.empty or len(htf_causal) < 50:
+        return None
+
+    return get_strategy_signal(htf_causal, ltf_causal.iloc[-ltf_window:])
+
+
 async def generate_signal(symbol=None):
     if symbol is None:
         symbol = SYMBOL
@@ -515,38 +569,24 @@ async def generate_signal(symbol=None):
             print(f"Not enough data fetched for {symbol}.")
             return None, 0
 
-        # --- INDICATOR STABILITY ---
-        # Calculate indicators on the FULL history before slicing
-        htf_df['ema50'] = ta.ema(htf_df['close'], length=50)
-        ltf_df = detect_fvg(ltf_df)
-        ltf_df = detect_order_block(ltf_df)
+        htf_df, ltf_df = precompute_strategy_features(htf_df, ltf_df)
 
-        # --- CAUSAL PARITY FIX ---
-        # 1. LTF: Drop the last bar (incomplete forming candle)
-        # So ltf.iloc[-1] is the last fully CLOSED 1-minute candle.
-        ltf_df = ltf_df.iloc[:-1]
-        
-        # 2. HTF: Ensure bias is based on the last bar that CLOSED before the LTF candle.
-        # In Alpaca/IBKR 15Min start-indexed bars, the candle at 'T' closed at 'T + 15'.
-        # If last_ltf is at 11:14 AM, the 11:00 AM 15-min bar has NOT closed yet.
-        # The 10:45 AM bar is the last closed one.
-        last_ltf_ts = ltf_df['timestamp'].iloc[-1]
-        htf_df = htf_df[htf_df['timestamp'] <= (last_ltf_ts - timedelta(minutes=15))]
-        
-        if htf_df.empty or ltf_df.empty or len(htf_df) < 50:
+        # Last fully closed LTF bar: drop newest potentially-forming row.
+        if len(ltf_df) < 2:
             return None, 0
+
+        evaluation_ts = ltf_df['timestamp'].iloc[-2]
+        return get_causal_signal_from_precomputed(htf_df, ltf_df, evaluation_ts)
 
     except Exception as e:
         print(f"Error generating signal for {symbol}: {e}")
         return None, 0
 
-    return get_strategy_signal(htf_df, ltf_df)
-
 # ================= RISK =================
 
 from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
 
-async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None):
+async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_override=None, risk_allocation_pct=None):
     """
     Calculates position size using IBKR account data.
     """
@@ -567,7 +607,9 @@ async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_overri
         equity = 10000.0
         buying_power = 10000.0
         
-    risk_amount = equity * RISK_PER_TRADE
+    alloc_risk_pct = 1.0 if risk_allocation_pct is None else float(risk_allocation_pct)
+    alloc_risk_pct = min(1.0, max(0.0, alloc_risk_pct))
+    risk_amount = equity * alloc_risk_pct * RISK_PER_TRADE
     stop_distance = abs(price - stop_loss_price)
     
     if stop_distance <= 0:
@@ -608,7 +650,7 @@ async def calculate_smart_quantity(symbol, price, stop_loss_price, budget_overri
     qty = int(min(qty_risk, qty_ticker, qty_bp))
     
     # Log
-    print(f"DEBUG: Equity: ${equity:.2f} | Risk($): ${risk_amount:.2f} | Entry: {price} | SL: {stop_loss_price} | Dist: {stop_distance:.2f}")
+    print(f"DEBUG: Equity: ${equity:.2f} | RiskAlloc: {alloc_risk_pct:.2f} | Risk($): ${risk_amount:.2f} | Entry: {price} | SL: {stop_loss_price} | Dist: {stop_distance:.2f}")
     print(f"DEBUG: RiskQty: {int(qty_risk)} | BPQty: {int(qty_bp)} -> Final: {qty}")
     
     return max(0, qty)
@@ -766,7 +808,7 @@ async def cancel_all_orders_for_symbol(symbol):
             ibkr_mgr.ib.cancelOrder(t.order)
             print(f"Cancelled order for {symbol}")
 
-async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=None, stock_budget_override=None, option_budget_override=None):
+async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None, max_option_contracts_override=None):
     ib = ibkr_mgr.ib
     # Determine bias for notifications
     bias = "bullish" if signal == "buy" else "bearish"
@@ -830,6 +872,10 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
         return
     
     price = price_df['close'].iloc[-1]
+    option_allocation_pct = option_allocation_override if option_allocation_override is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_allocation_pct = min(1.0, max(0.0, float(option_allocation_pct)))
+    stock_allocation_pct = 1.0 - option_allocation_pct
+    max_option_contracts = max_option_contracts_override if max_option_contracts_override is not None else getattr(config, 'MAX_OPTION_CONTRACTS', -1)
     
     # 1. Fetch CURRENT positions
     positions = ib.positions()
@@ -970,7 +1016,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 for v in acc_values:
                     if v.tag == 'NetLiquidation': equity = float(v.value)
                 
-                budget_pct = option_budget_override if option_budget_override is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+                budget_pct = option_allocation_pct
                 total_budget = equity * budget_pct
                 
                 existing_option_exposure = 0.0
@@ -988,12 +1034,19 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     print(f"⚠️ Insufficient Budget for {symbol} option.")
                     return
                 
-                qty = int(available_budget // cost_per_contract)
-                qty = min(qty, 5) # Cap at 5
-                
-                if qty < 1: return
+                current_risk_target = equity * option_allocation_pct * RISK_PER_TRADE
+                risk_per_contract = entry_est * 0.20 * 100
+                qty_risk = int(current_risk_target // risk_per_contract) if risk_per_contract > 0 else 0
+                qty_cap = int(available_budget // cost_per_contract)
+                qty = min(qty_risk, qty_cap)
+                if max_option_contracts != -1 and qty > max_option_contracts:
+                    print(f"DEBUG: Capping contracts from {qty} to {max_option_contracts}.")
+                    qty = max_option_contracts
+                if qty < 1:
+                    print("⚠️ Calculated contracts < 1. Skipping.")
+                    return
 
-                print(f"Sizing: Qty {qty}")
+                print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
                 
                 # Place Bracket
                 action = 'BUY'
@@ -1033,10 +1086,24 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     if signal == "buy":
         if qty_held == 0:
             price = float(price)
-            sl_price = float(round(price * 0.95, 2))
-            tp_price = float(round(price * 1.125, 2))
+            swing_low = get_last_swing_low(price_df, window=5)
+            if swing_low and swing_low < price:
+                sl_price = float(round(swing_low, 2))
+                print(f"Structure Stop: Swing Low at {sl_price}")
+            else:
+                sl_price = float(round(price * 0.995, 2))
+                print(f"Fallback Stop: 0.5% at {sl_price}")
+
+            risk_dist = price - sl_price
+            tp_price = float(round(price + (risk_dist * 2.5), 2))
             
-            qty = await calculate_smart_quantity(symbol, price, sl_price, budget_override=stock_budget_override)
+            qty = await calculate_smart_quantity(
+                symbol,
+                price,
+                sl_price,
+                budget_override=stock_allocation_pct,
+                risk_allocation_pct=stock_allocation_pct
+            )
             if qty <= 0: return
 
             print(f"Placing BUY Bracket: Entry ~{price} | SL {sl_price:.2f} | TP {tp_price:.2f} | Qty {qty}")
@@ -1470,11 +1537,10 @@ def is_market_open():
 class TradingSession:
     """Manages trading session state and statistics."""
     
-    def __init__(self, duration_hours=None, max_trades=None):
+    def __init__(self, duration_hours=None):
         ib = ibkr_mgr.ib
         self.start_time = datetime.now()
         self.duration_hours = duration_hours
-        self.max_trades = max_trades
         self.trades_executed = 0
         self.should_stop = False
         
@@ -1531,11 +1597,6 @@ class TradingSession:
         if self.duration_hours is not None:
             elapsed_hours = (datetime.now() - self.start_time).total_seconds() / 3600
             if elapsed_hours >= self.duration_hours:
-                return False
-                
-        # Check trades limit
-        if self.max_trades is not None:
-            if self.trades_executed >= self.max_trades:
                 return False
                 
         return True
@@ -1655,14 +1716,12 @@ class TradingSession:
                 )
         
         # Limits
-        if self.max_trades or self.duration_hours:
+        if self.duration_hours:
             summary.extend([
                 "",
                 "SESSION LIMITS",
                 "-" * 60,
             ])
-            if self.max_trades:
-                summary.append(f"Trade Limit:     {self.max_trades}")
             if self.duration_hours:
                 summary.append(f"Duration Limit:  {self.duration_hours} hours")
         
@@ -1696,9 +1755,8 @@ async def main():
     parser.add_argument("--options", action="store_true", help="Enable options trading (overrides config)")
     parser.add_argument("--cap", type=int, metavar="N", help="Daily trade cap: -1 for unlimited, 0 for no trades, positive for max trades per day (default: 5)")
     parser.add_argument("--session-duration", type=float, help="Session duration in hours (runs indefinitely if not specified)")
-    parser.add_argument("--max-trades", type=int, help="Maximum number of trades per session (unlimited if not specified)")
-    parser.add_argument("--stock-budget", type=float, help="Stock allocation budget override (0.0 to 1.0)")
-    parser.add_argument("--option-budget", type=float, help="Option allocation budget override (0.0 to 1.0)")
+    parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
+    parser.add_argument("--max-option-contracts", type=int, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--state-file", type=str, help="Custom path to the trade state JSON file")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
     
@@ -1710,9 +1768,15 @@ async def main():
         print("Overriding ENABLE_OPTIONS to True from command line.")
         config.ENABLE_OPTIONS = True
     
-    # Validation
-    if config.ENABLE_OPTIONS and args.stock_budget is not None:
-        print("❌ Error: --stock-budget is only valid in Stock Mode.")
+    option_allocation = args.option_allocation if args.option_allocation is not None else getattr(config, 'OPTIONS_ALLOCATION_PCT', 0.20)
+    option_allocation = float(option_allocation)
+    if option_allocation < 0 or option_allocation > 1:
+        print("❌ Error: --option-allocation must be within [0.0, 1.0].")
+        sys.exit(1)
+    max_option_contracts = args.max_option_contracts if args.max_option_contracts is not None else getattr(config, 'MAX_OPTION_CONTRACTS', -1)
+    max_option_contracts = int(max_option_contracts)
+    if max_option_contracts != -1 and max_option_contracts < 1:
+        print("❌ Error: --max-option-contracts must be -1 (unlimited) or >= 1.")
         sys.exit(1)
     
     daily_cap = args.cap if args.cap is not None else 5
@@ -1733,7 +1797,7 @@ async def main():
         return
 
     # Initialize session
-    session = TradingSession(duration_hours=args.session_duration, max_trades=args.max_trades)
+    session = TradingSession(duration_hours=args.session_duration)
     session.setup_signal_handlers()
     
     print(f"Starting SMC Bot for {target_symbol} (Options: {config.ENABLE_OPTIONS})...")
@@ -1817,8 +1881,8 @@ async def main():
                             target_symbol, 
                             use_daily_cap=use_cap, 
                             daily_cap_value=daily_cap if use_cap else None,
-                            stock_budget_override=args.stock_budget,
-                            option_budget_override=args.option_budget
+                            option_allocation_override=option_allocation,
+                            max_option_contracts_override=max_option_contracts
                         )
                         session.record_trade()
                         print("Trade placed. Cooling down for 5 minutes...")
