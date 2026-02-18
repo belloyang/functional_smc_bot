@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from ib_insync import IB, util, Stock
 try:
     from . import config
@@ -12,6 +13,8 @@ util.patchAsyncio()
 class IBKRManager:
     _instance = None
     _ib = None
+    _error_handler_attached = False
+    _recent_error_keys = {}
 
     def __new__(cls):
         if cls._instance is None:
@@ -40,6 +43,11 @@ class IBKRManager:
                 config.IBKR_PORT, 
                 clientId=config.IBKR_CLIENT_ID
             )
+            # Silence verbose raw ib_insync wrapper error logs; we print concise messages via errorEvent.
+            logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
+            if not self._error_handler_attached:
+                self._ib.errorEvent += self._on_ib_error
+                self._error_handler_attached = True
             # Use a single market data type. Calling 1/2/3/4 in sequence leaves IBKR on the last one.
             # 1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen
             market_data_type = int(getattr(config, "IBKR_MARKET_DATA_TYPE", 1))
@@ -51,6 +59,39 @@ class IBKRManager:
         except Exception as e:
             print(f"Failed to connect to IBKR: {e}")
             return False
+
+    def _on_ib_error(self, req_id, code, message, contract):
+        """Emit concise, deduplicated IBKR errors for known noisy cases."""
+        symbol = getattr(contract, "localSymbol", None) or getattr(contract, "symbol", "?")
+        code = int(code)
+
+        if code == 300:
+            # Cleanup noise ("Can't find EId with tickerId")
+            return
+
+        if code in (354, 10089, 10091, 10168):
+            short = "Market data subscription missing"
+            if code == 10168:
+                short = "Market data not subscribed and delayed data not enabled"
+            elif code == 10089:
+                short = "Live market data requires additional API subscription (delayed may be available)"
+            elif code == 10091:
+                short = "Part of requested market data requires additional API subscription"
+            detail = f"⚠️ {short} [{symbol}] (code {code})"
+        elif code == 162:
+            detail = f"⚠️ Historical data request failed/cancelled [{symbol}] (code 162)"
+        else:
+            # Keep unfamiliar errors visible but short.
+            compact_msg = str(message).split(".")[0][:140]
+            detail = f"⚠️ IBKR error {code} [{symbol}]: {compact_msg}"
+
+        now = time.time()
+        key = (code, symbol, detail)
+        last = self._recent_error_keys.get(key, 0.0)
+        if now - last < 8.0:
+            return
+        self._recent_error_keys[key] = now
+        print(detail)
 
     async def historical_health_check(self, symbol="SPY", timeout_sec=15):
         """
@@ -90,7 +131,9 @@ class IBKRManager:
             self._ib.disconnect()
             print("Disconnected from IBKR.")
         # Clear the reference to avoid __del__ errors after loop closure
-        self._ib = None 
+        self._ib = None
+        self._error_handler_attached = False
+        self._recent_error_keys = {}
 
     def get_client(self):
         """Return the IB instance."""
