@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from ib_insync import IB, util
+from ib_insync import IB, util, Stock
 try:
     from . import config
 except ImportError:
@@ -40,15 +40,49 @@ class IBKRManager:
                 config.IBKR_PORT, 
                 clientId=config.IBKR_CLIENT_ID
             )
-            self._ib.reqMarketDataType(1)  # Live (default)
-            self._ib.reqMarketDataType(2)  # Frozen (at market close)
-            self._ib.reqMarketDataType(3)  # Delayed (delayed by 15-20 min)
-            self._ib.reqMarketDataType(4)  # Delayed Frozen
-            print("Successfully connected to IBKR (using Multi-Mode Market Data).")
+            # Use a single market data type. Calling 1/2/3/4 in sequence leaves IBKR on the last one.
+            # 1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen
+            market_data_type = int(getattr(config, "IBKR_MARKET_DATA_TYPE", 1))
+            if market_data_type not in (1, 2, 3, 4):
+                market_data_type = 1
+            self._ib.reqMarketDataType(market_data_type)
+            print(f"Successfully connected to IBKR (market data type={market_data_type}).")
             return True
         except Exception as e:
             print(f"Failed to connect to IBKR: {e}")
             return False
+
+    async def historical_health_check(self, symbol="SPY", timeout_sec=15):
+        """
+        Lightweight historical data health probe.
+        Returns (ok: bool, detail: str).
+        """
+        if not self._ib or not self._ib.isConnected():
+            return False, "not connected"
+        try:
+            contract = await self._ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD"))
+            if not contract:
+                return False, "contract qualification failed"
+            bars = await asyncio.wait_for(
+                self._ib.reqHistoricalDataAsync(
+                    contract[0],
+                    endDateTime="",
+                    durationStr="2 D",
+                    barSizeSetting="15 mins",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=1,
+                    keepUpToDate=False,
+                ),
+                timeout=timeout_sec,
+            )
+            if not bars:
+                return False, "no bars"
+            return True, f"{len(bars)} bars"
+        except asyncio.TimeoutError:
+            return False, "timeout"
+        except Exception as e:
+            return False, str(e)
 
     def disconnect(self):
         """Disconnect from TWS/Gateway."""
