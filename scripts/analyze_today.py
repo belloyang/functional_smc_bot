@@ -125,7 +125,7 @@ def scan_today(symbol: str, min_conf: str = "all"):
         count += 1
         t_et = pd.Timestamp(ts).tz_convert(et).strftime("%I:%M %p")
         label = get_confidence_label(confidence)
-        print(f"🚨 {symbol} | {signal.upper()} at {t_et} | confidence={confidence}% [{label}]")
+        print(f"🚨 {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
 
     if count == 0:
         print("No historical signals detected since market open.")
