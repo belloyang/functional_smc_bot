@@ -91,8 +91,14 @@ async def check_live_quote(symbol: str, timeout_sec: float, errors: IbErrorColle
         ask = ticker.ask
         if (bid is not None and bid > 0) or (ask is not None and ask > 0):
             return CheckResult("Live quote", True, f"bid={bid}, ask={ask}")
-        if errors.has(10089, symbol):
+        if errors.has(10089, symbol) or errors.has(10168, symbol):
             should_cancel = False
+            if errors.has(10168, symbol):
+                return CheckResult(
+                    "Live quote",
+                    False,
+                    "not subscribed and delayed not enabled (10168).",
+                )
             return CheckResult(
                 "Live quote",
                 False,
@@ -154,7 +160,9 @@ async def _run(symbol: str, duration: str, timeout_sec: float):
     try:
         results.append(await check_live_quote(symbol, timeout_sec, err))
         results.extend(await check_hist(symbol, duration, timeout_sec))
-        if err.has(10089, symbol):
+        if err.has(10168, symbol):
+            results.append(CheckResult("Subscription hint", False, "IBKR code 10168 detected: market data not subscribed and delayed not enabled."))
+        elif err.has(10089, symbol):
             results.append(CheckResult("Subscription hint", False, "IBKR code 10089 detected: live API subscription required for this instrument/feed."))
         print_summary(results, symbol)
     finally:
