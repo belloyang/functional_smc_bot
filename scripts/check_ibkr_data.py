@@ -20,6 +20,31 @@ class CheckResult:
     ok: bool
     detail: str
 
+@dataclass
+class IbError:
+    req_id: int
+    code: int
+    message: str
+    symbol: str
+
+
+class IbErrorCollector:
+    def __init__(self):
+        self.errors: list[IbError] = []
+
+    def on_error(self, req_id, code, message, contract):
+        sym = getattr(contract, "symbol", "") if contract is not None else ""
+        self.errors.append(IbError(req_id=int(req_id), code=int(code), message=str(message), symbol=str(sym)))
+
+    def has(self, code: int, symbol: str = "") -> bool:
+        s = (symbol or "").upper()
+        for e in self.errors:
+            if e.code != code:
+                continue
+            if not s or e.symbol.upper() == s:
+                return True
+        return False
+
 
 async def fetch_hist_once(contract, duration, bar_size, what_to_show, timeout_sec):
     try:
@@ -45,7 +70,7 @@ async def fetch_hist_once(contract, duration, bar_size, what_to_show, timeout_se
         return False, str(e)
 
 
-async def check_live_quote(symbol: str, timeout_sec: float) -> CheckResult:
+async def check_live_quote(symbol: str, timeout_sec: float, errors: IbErrorCollector) -> CheckResult:
     contract = Stock(symbol, "SMART", "USD")
     try:
         qualified = await ibkr_mgr.ib.qualifyContractsAsync(contract)
@@ -55,6 +80,7 @@ async def check_live_quote(symbol: str, timeout_sec: float) -> CheckResult:
         return CheckResult("Contract qualification", False, str(e))
 
     ticker = ibkr_mgr.ib.reqMktData(contract, "", False, False)
+    should_cancel = True
     try:
         for _ in range(max(1, int(timeout_sec / 0.5))):
             await asyncio.sleep(0.5)
@@ -65,9 +91,17 @@ async def check_live_quote(symbol: str, timeout_sec: float) -> CheckResult:
         ask = ticker.ask
         if (bid is not None and bid > 0) or (ask is not None and ask > 0):
             return CheckResult("Live quote", True, f"bid={bid}, ask={ask}")
+        if errors.has(10089, symbol):
+            should_cancel = False
+            return CheckResult(
+                "Live quote",
+                False,
+                "missing live API subscription (10089). Delayed data may still be available.",
+            )
         return CheckResult("Live quote", False, "no valid market price/bid/ask in time window")
     finally:
-        ibkr_mgr.ib.cancelMktData(contract)
+        if should_cancel:
+            ibkr_mgr.ib.cancelMktData(contract)
 
 
 async def check_hist(symbol: str, duration: str, timeout_sec: float) -> list[CheckResult]:
@@ -115,11 +149,16 @@ async def _run(symbol: str, duration: str, timeout_sec: float):
         return 2
 
     results: list[CheckResult] = []
+    err = IbErrorCollector()
+    ibkr_mgr.ib.errorEvent += err.on_error
     try:
-        results.append(await check_live_quote(symbol, timeout_sec))
+        results.append(await check_live_quote(symbol, timeout_sec, err))
         results.extend(await check_hist(symbol, duration, timeout_sec))
+        if err.has(10089, symbol):
+            results.append(CheckResult("Subscription hint", False, "IBKR code 10089 detected: live API subscription required for this instrument/feed."))
         print_summary(results, symbol)
     finally:
+        ibkr_mgr.ib.errorEvent -= err.on_error
         ibkr_mgr.disconnect()
 
     return 0 if any(r.ok for r in results) else 1
