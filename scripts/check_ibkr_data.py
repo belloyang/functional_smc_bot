@@ -3,8 +3,13 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from typing import Optional
+import os
+import sys
 
 from ib_insync import Stock
+
+# Add project root to path so `app` imports work when script is run directly.
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.ibkr_manager import ibkr_mgr
 
