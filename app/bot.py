@@ -1122,7 +1122,8 @@ def mark_loss():
     state = load_global_safety_state()
     state["last_loss_time"] = datetime.now(timezone.utc).isoformat()
     save_global_safety_state(state)
-    print("🕒 Post-Loss Cool-down Triggered (60 min).")
+    cool_down_minutes = getattr(config, 'COOL_DOWN_MINUTES', 60)
+    print(f"🕒 Post-Loss Cool-down Triggered ({cool_down_minutes} min).")
 
 def get_state_file_path(symbol=None):
     """Returns the state file path, prioritized by --state-file then symbol-specific."""
@@ -1264,7 +1265,7 @@ def manage_trade_updates(target_symbol=None):
             stop_order = None
             current_stop = 0.0
             try:
-                orders = trade_client.get_orders(GetOrdersRequest(status=OrderStatus.OPEN, symbol=symbol))
+                orders = trade_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbol=symbol))
                 for o in orders:
                     if o.type == 'stop' or o.type == 'stop_limit':
                         stop_order = o
