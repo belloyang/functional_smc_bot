@@ -36,6 +36,68 @@ RISK_PER_TRADE = config.RISK_PER_TRADE
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+async def _req_historical_with_retry(
+    req_contract,
+    *,
+    duration_str,
+    bar_size,
+    what_to_show,
+    use_rth=False,
+    format_date=1,
+    keep_up_to_date=False,
+    log_symbol=None,
+):
+    """
+    Wrapper around IBKR historical requests with timeout/backoff.
+    Reduces long hangs and noisy cascades of cancelled requests.
+    """
+    timeout_sec = float(getattr(config, "IBKR_HIST_TIMEOUT_SEC", 12))
+    max_attempts = max(1, int(getattr(config, "IBKR_HIST_MAX_ATTEMPTS", 2)))
+    backoff_base = float(getattr(config, "IBKR_HIST_BACKOFF_BASE_SEC", 0.8))
+
+    symbol = log_symbol or getattr(req_contract, "symbol", "?")
+    exchange = getattr(req_contract, "exchange", "?")
+
+    for attempt in range(1, max_attempts + 1):
+        if not ibkr_mgr.ib or not ibkr_mgr.ib.isConnected():
+            print(f"⚠️ IBKR not connected. Skip historical request for {symbol}.")
+            return []
+
+        try:
+            bars = await asyncio.wait_for(
+                ibkr_mgr.ib.reqHistoricalDataAsync(
+                    req_contract,
+                    endDateTime="",
+                    durationStr=duration_str,
+                    barSizeSetting=bar_size,
+                    whatToShow=what_to_show,
+                    useRTH=use_rth,
+                    formatDate=format_date,
+                    keepUpToDate=keep_up_to_date,
+                ),
+                timeout=timeout_sec,
+            )
+            if bars:
+                return bars
+        except asyncio.TimeoutError:
+            print(
+                f"⚠️ Historical timeout {attempt}/{max_attempts} for "
+                f"{symbol} {bar_size} {what_to_show} @{exchange}"
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            # 162 cancellations are common after timeouts/retries; keep logs concise.
+            if "historical data query cancelled" not in msg:
+                print(
+                    f"⚠️ Historical request failed {attempt}/{max_attempts} "
+                    f"for {symbol} {bar_size} {what_to_show} @{exchange}: {e}"
+                )
+
+        if attempt < max_attempts:
+            await asyncio.sleep(backoff_base * (2 ** (attempt - 1)))
+
+    return []
+
 async def get_bars(contract_or_symbol, timeframe, limit):
     """
     Fetch historical bars from IBKR.
@@ -88,40 +150,32 @@ async def get_bars(contract_or_symbol, timeframe, limit):
                 req_contract = contract
                 req_contract.exchange = exch
 
-            try:
-                # print(f"DEBUG: Requesting {wts} for {symbol} at {exch}...")
-                bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
-                    req_contract,
-                    endDateTime='',
-                    durationStr='14 D', # Match analyze_today.py for EMA50 stability
-                    barSizeSetting=bar_size,
-                    whatToShow=wts,
-                    useRTH=False,
-                    formatDate=1,
-                    keepUpToDate=False
-                )
-                if bars:
-                    # print(f"✅ Successfully fetched {wts} for {symbol} at {exch}")
-                    break
-            except Exception:
-                continue
+            bars = await _req_historical_with_retry(
+                req_contract,
+                duration_str="14 D",  # Match analyze_today.py for EMA50 stability
+                bar_size=bar_size,
+                what_to_show=wts,
+                use_rth=False,
+                format_date=1,
+                keep_up_to_date=False,
+                log_symbol=symbol,
+            )
+            if bars:
+                break
         if bars: break
     
     if not bars:
         # Final attempt: try a larger bar size just to get ANY price
-        # print(f"DEBUG: Final fallback for {symbol}: 1 Day bars...")
-        try:
-            bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime='',
-                durationStr='14 D',
-                barSizeSetting='1 day',
-                whatToShow='MIDPOINT',
-                useRTH=False,
-                formatDate=1,
-                keepUpToDate=False
-            )
-        except Exception: pass
+        bars = await _req_historical_with_retry(
+            contract,
+            duration_str="14 D",
+            bar_size="1 day",
+            what_to_show="MIDPOINT",
+            use_rth=False,
+            format_date=1,
+            keep_up_to_date=False,
+            log_symbol=symbol,
+        )
     
     if not bars:
         print(f"No bars returned for {symbol}")
@@ -163,20 +217,18 @@ async def get_latest_price_fallback(contract_or_symbol):
         
         # 3.5 Try 'TRADES' for Options (Sometimes MIDPOINT is restricted)
         if isinstance(contract_or_symbol, Option):
-            try:
-                # Use a small window 1-min TRADES history
-                bars = await ibkr_mgr.ib.reqHistoricalDataAsync(
-                    contract_or_symbol,
-                    endDateTime='',
-                    durationStr='1 D',
-                    barSizeSetting='1 min',
-                    whatToShow='TRADES',
-                    useRTH=False,
-                    formatDate=1
-                )
-                if bars:
-                    return float(bars[-1].close)
-            except Exception: pass
+            bars = await _req_historical_with_retry(
+                contract_or_symbol,
+                duration_str="1 D",
+                bar_size="1 min",
+                what_to_show="TRADES",
+                use_rth=False,
+                format_date=1,
+                keep_up_to_date=False,
+                log_symbol=contract_or_symbol.symbol,
+            )
+            if bars:
+                return float(bars[-1].close)
             
         # 4. Try Alpaca Fallback (Last Resort)
         try:
