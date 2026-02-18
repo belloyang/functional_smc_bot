@@ -10,7 +10,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app import config
 from app.bot import (
-    get_strategy_signal,
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
     get_confidence_label,
     send_discord_notification
 )
@@ -47,15 +48,7 @@ def fetch_data(client, symbol, start_time, end_time):
             continue
     return None, None, None
 
-def process_bars(htf_df, ltf_df):
-    """
-    Reset index for processing (matching live bot behavior).
-    """
-    htf_df = htf_df.reset_index()
-    ltf_df = ltf_df.reset_index()
-    return htf_df, ltf_df
-
-def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
+def check_for_signal(timestamp, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
     """Checks if a signal exists at a specific timestamp and prints if new."""
     ts = pd.Timestamp(timestamp)
     if ts.tzinfo is None:
@@ -63,15 +56,18 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     else:
         ts = ts.tz_convert('UTC')
 
-    # Slice data up to current timestamp (matching live bot behavior)
-    htf_slice = htf_data[htf_data['timestamp'] <= ts]
-    ltf_slice = ltf_data[ltf_data['timestamp'] <= ts]
-    
-    if len(htf_slice) < 50 or len(ltf_slice) < 5:
+    # Mirror app.bot: evaluate only the last fully closed 1m candle in live mode.
+    if is_live:
+        latest_closed_ts = pd.Timestamp.now(tz='UTC').floor('min') - pd.Timedelta(minutes=1)
+        if ts > latest_closed_ts:
+            return False
+
+    ltf_causal = ltf_data[ltf_data['timestamp'] <= ts]
+    if len(ltf_causal) < 5:
         return False
-    
-    # Use the same signal generation as live bot
-    res = get_strategy_signal(htf_slice, ltf_slice)
+
+    # Use the exact causal signal helper path from app.bot.
+    res = get_causal_signal_from_precomputed(htf_data, ltf_data, ts, ltf_window=200)
     if not res:
         return False
 
@@ -79,11 +75,6 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     if signal_raw is None:
         return False
 
-    # For logging: get HTF bias from the sliced data
-    htf_causal = htf_slice
-    if len(htf_causal) < 50:
-        return False
-    
     # Check Confidence Threshold
     if confidence < min_conf_val:
         return False
@@ -105,15 +96,16 @@ def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signal
     # Calculate bias from HTF data (get_strategy_signal already calculated EMA internally)
     # We'll determine bias from the signal itself
     bias = "BULLISH" if signal == "BUY" else "BEARISH"
+    last_price = float(ltf_causal.iloc[-1]['close'])
     
     print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
-    print(f"   Price: ${ltf_row['close']:.2f}")
+    print(f"   Price: ${last_price:.2f}")
     print(f"   HTF Bias: {bias}")
     print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
     print("-" * 40)
     
     if is_live:
-        send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
+        send_discord_notification(signal, last_price, time_et, symbol, bias, confidence)
         
     return True
 
@@ -157,14 +149,14 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
         print("❌ CRITICAL: Could not fetch market data. Check API keys/connection.")
         return
     
-    htf_processed, ltf_processed = process_bars(htf_raw, ltf_raw)
+    htf_processed, ltf_processed = precompute_strategy_features(htf_raw, ltf_raw)
     
     # Perform Scan
     scan_bars = ltf_processed[ltf_processed['timestamp'] >= scan_start_utc]
     
     signals_count = 0
     for _, row in scan_bars.iterrows():
-        if check_for_signal(row['timestamp'], row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
+        if check_for_signal(row['timestamp'], htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
             signals_count += 1
             
     if signals_count == 0:
@@ -193,12 +185,12 @@ def analyze_today_signals(symbol="SPY", min_conf_str="all"):
                 h_live, l_live, _ = fetch_data(client, symbol, start_live, end_live)
                 if h_live is None: continue
                 
-                h_proc, l_proc = process_bars(h_live, l_live)
+                h_proc, l_proc = precompute_strategy_features(h_live, l_live)
                 
                 # Check the last 3 bars just in case of slight polling delay
                 latest_bars = l_proc.tail(3)
                 for _, row in latest_bars.iterrows():
-                    check_for_signal(row['timestamp'], row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
+                    check_for_signal(row['timestamp'], h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
                     
         except KeyboardInterrupt:
             print("\n🛑 Monitoring stopped by user.")
