@@ -34,9 +34,9 @@ IBKR_PORT = int(os.getenv("IBKR_PORT", "7497")) # 7497 for paper, 7496 for live
 IBKR_CLIENT_ID = random.randint(1, 1000)
 # 1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen
 IBKR_MARKET_DATA_TYPE = int(os.getenv("IBKR_MARKET_DATA_TYPE", "1"))
-IBKR_HIST_TIMEOUT_SEC = float(os.getenv("IBKR_HIST_TIMEOUT_SEC", "12"))
+IBKR_HIST_TIMEOUT_SEC = float(os.getenv("IBKR_HIST_TIMEOUT_SEC", "20"))
 IBKR_HIST_MAX_ATTEMPTS = int(os.getenv("IBKR_HIST_MAX_ATTEMPTS", "2"))
-IBKR_HIST_BACKOFF_BASE_SEC = float(os.getenv("IBKR_HIST_BACKOFF_BASE_SEC", "0.8"))
+IBKR_HIST_BACKOFF_BASE_SEC = float(os.getenv("IBKR_HIST_BACKOFF_BASE_SEC", "1.0"))
 
 # --- ALPACA (BACKWARD COMPATIBILITY) ---
 API_KEY = os.getenv("ALPACA_API_KEY")
