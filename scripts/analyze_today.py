@@ -1,208 +1,171 @@
-import pandas as pd
 import sys
 import os
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import pandas as pd
 
 # Add root directory to path to allow imports from app
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import config
-from app.bot import (
-    precompute_strategy_features,
-    get_causal_signal_from_precomputed,
-    get_confidence_label,
-    send_discord_notification
-)
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-def fetch_data(client, symbol, start_time, end_time):
-    """Utility to fetch HTF and LTF data with feed fallback."""
-    feeds = ["sip", "iex"]
-    for feed in feeds:
+from app import config
+from app.bot import (
+    generate_signal,
+    get_confidence_label,
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
+)
+
+
+CONF_THRESHOLDS = {
+    "all": 0,
+    "low": 20,
+    "medium": 50,
+    "high": 80,
+}
+
+
+def _format_signal_line(symbol: str, signal: str, confidence: int) -> str:
+    et = ZoneInfo("US/Eastern")
+    now_et = datetime.now(et).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    label = get_confidence_label(confidence)
+    return f"{now_et} | {symbol} | {signal.upper()} | confidence={confidence}% [{label}]"
+
+
+def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: int = 60):
+    threshold = CONF_THRESHOLDS.get(min_conf, 0)
+    symbol = symbol.upper()
+    print(f"Signal source: app.bot.generate_signal")
+    print(f"Symbol: {symbol} | min_conf: {min_conf} ({threshold}) | watch: {watch}")
+
+    last_seen_key = None
+    while True:
+        res = generate_signal(symbol)
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+
+        if signal and confidence >= threshold:
+            key = (signal, confidence)
+            line = _format_signal_line(symbol, signal, confidence)
+            # In watch mode, avoid printing the exact same result repeatedly every poll.
+            if not watch or key != last_seen_key:
+                print(f"🚨 {line}")
+            last_seen_key = key
+        else:
+            if not watch:
+                print("No signal.")
+
+        if not watch:
+            return
+
+        time.sleep(max(1, int(interval_sec)))
+
+
+def _fetch_for_scan(symbol: str, start_utc: datetime, end_utc: datetime):
+    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+    for feed in ("sip", "iex"):
         try:
             htf_req = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-                start=start_time,
-                end=end_time,
-                feed=feed
+                start=start_utc,
+                end=end_utc,
+                feed=feed,
             )
-            htf_data = client.get_stock_bars(htf_req).df
-            
             ltf_req = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                start=start_time,
-                end=end_time,
-                feed=feed
+                start=start_utc,
+                end=end_utc,
+                feed=feed,
             )
-            ltf_data = client.get_stock_bars(ltf_req).df
-            
-            if not htf_data.empty and not ltf_data.empty:
-                return htf_data, ltf_data, feed
+            htf_raw = client.get_stock_bars(htf_req).df
+            ltf_raw = client.get_stock_bars(ltf_req).df
+            if not htf_raw.empty and not ltf_raw.empty:
+                return htf_raw, ltf_raw, feed
         except Exception:
             continue
     return None, None, None
 
-def check_for_signal(timestamp, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
-    """Checks if a signal exists at a specific timestamp and prints if new."""
-    ts = pd.Timestamp(timestamp)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize('UTC')
-    else:
-        ts = ts.tz_convert('UTC')
 
-    # Mirror app.bot: evaluate only the last fully closed 1m candle in live mode.
-    if is_live:
-        latest_closed_ts = pd.Timestamp.now(tz='UTC').floor('min') - pd.Timedelta(minutes=1)
-        if ts > latest_closed_ts:
-            return False
+def scan_today(symbol: str, min_conf: str = "all"):
+    threshold = CONF_THRESHOLDS.get(min_conf, 0)
+    symbol = symbol.upper()
+    et = ZoneInfo("US/Eastern")
+    now_et = datetime.now(et)
+    market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_open_utc = market_open_et.astimezone(timezone.utc)
+    end_utc = datetime.now(timezone.utc)
+    lookback_start = end_utc - timedelta(days=14)
 
-    ltf_causal = ltf_data[ltf_data['timestamp'] <= ts]
-    if len(ltf_causal) < 5:
-        return False
-
-    # Use the exact causal signal helper path from app.bot.
-    res = get_causal_signal_from_precomputed(htf_data, ltf_data, ts, ltf_window=200)
-    if not res:
-        return False
-
-    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
-    if signal_raw is None:
-        return False
-
-    # Check Confidence Threshold
-    if confidence < min_conf_val:
-        return False
-        
-    signal = signal_raw.upper()
-    
-    # Avoid duplicate printing within 5 minutes of same signal
-    sig_id = f"{signal}_{ts.date()}"
-    last_sig_time = reported_signals.get(sig_id)
-    
-    if last_sig_time and (ts - last_sig_time).total_seconds() < 300:
-        return False
-        
-    reported_signals[sig_id] = ts
-    time_et = ts.tz_convert(ET).strftime("%I:%M %p")
-    
-    label = get_confidence_label(confidence)
-    
-    # Calculate bias from HTF data (get_strategy_signal already calculated EMA internally)
-    # We'll determine bias from the signal itself
-    bias = "BULLISH" if signal == "BUY" else "BEARISH"
-    last_price = float(ltf_causal.iloc[-1]['close'])
-    
-    print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
-    print(f"   Price: ${last_price:.2f}")
-    print(f"   HTF Bias: {bias}")
-    print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
-    print("-" * 40)
-    
-    if is_live:
-        send_discord_notification(signal, last_price, time_et, symbol, bias, confidence)
-        
-    return True
-
-def analyze_today_signals(symbol="SPY", min_conf_str="all"):
-    ET = ZoneInfo("US/Eastern")
-    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
-    reported_signals = {} # To track and dedup signals
-    
-    # Map confidence choices to numeric thresholds
-    CONF_THRESHOLDS = {
-        'all': 0,
-        'low': 20,
-        'medium': 50,
-        'high': 80
-    }
-    min_conf_val = CONF_THRESHOLDS.get(min_conf_str, 0)
-    
-    now_et = datetime.now(ET)
-    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    
-    is_live = (market_open <= now_et <= market_close)
-    
-    if is_live:
-        print(f"🚀 [LIVE MODE] Monitoring {symbol} until market close ({market_close.strftime('%I:%M %p ET')})")
-    else:
-        print(f"📊 [HISTORICAL MODE] Analyzing {symbol} for today ({now_et.strftime('%Y-%m-%d')})")
-    print("="*80)
-
-    # 1. Initial Scan (From Open to Now)
-    scan_start = market_open if now_et >= market_open else (now_et - timedelta(days=1)).replace(hour=9, minute=30)
-    scan_start_utc = scan_start.astimezone(timezone.utc)
-    
-    print(f"Fetching data and scanning established signals since market open...")
-    
-    end_time_utc = datetime.now(timezone.utc)
-    lookback_start_utc = end_time_utc - timedelta(days=14) # 14 days for stable EMA50
-    
-    htf_raw, ltf_raw, feed = fetch_data(client, symbol, lookback_start_utc, end_time_utc)
+    htf_raw, ltf_raw, feed = _fetch_for_scan(symbol, lookback_start, end_utc)
     if htf_raw is None:
-        print("❌ CRITICAL: Could not fetch market data. Check API keys/connection.")
+        print("❌ Could not fetch data for scan.")
         return
-    
-    htf_processed, ltf_processed = precompute_strategy_features(htf_raw, ltf_raw)
-    
-    # Perform Scan
-    scan_bars = ltf_processed[ltf_processed['timestamp'] >= scan_start_utc]
-    
-    signals_count = 0
-    for _, row in scan_bars.iterrows():
-        if check_for_signal(row['timestamp'], htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
-            signals_count += 1
-            
-    if signals_count == 0:
-        print("No historical signals detected today so far.")
+
+    htf, ltf = precompute_strategy_features(htf_raw, ltf_raw)
+    scan_rows = ltf[ltf["timestamp"] >= market_open_utc]
+    printed = {}
+    count = 0
+
+    print(f"Scan mode: historical replay since market open | feed={feed}")
+    for _, row in scan_rows.iterrows():
+        ts = row["timestamp"]
+        res = get_causal_signal_from_precomputed(htf, ltf, ts, ltf_window=200)
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+        if not signal or confidence < threshold:
+            continue
+        key = (signal, pd.Timestamp(ts).floor("5min"))
+        if key in printed:
+            continue
+        printed[key] = True
+        count += 1
+        t_et = pd.Timestamp(ts).tz_convert(et).strftime("%I:%M %p")
+        label = get_confidence_label(confidence)
+        print(f"🚨 {symbol} | {signal.upper()} at {t_et} | confidence={confidence}% [{label}]")
+
+    if count == 0:
+        print("No historical signals detected since market open.")
     else:
-        print(f"✅ Found {signals_count} historical signals today.")
+        print(f"✅ Historical signals found: {count}")
 
-    # 2. Live Monitoring Loop
-    if is_live:
-        print("\n" + "-"*80)
-        print(f"📡 Now monitoring {symbol} LIVE. Alerts will print as candles close.")
-        print("-" * 80)
-        
-        try:
-            while datetime.now(ET) <= market_close:
-                # Wait for next minute candle to close (plus small buffer)
-                now = datetime.now()
-                sleep_seconds = 61 - now.second
-                # print(f"DEBUG: Sleeping {sleep_seconds}s for next candle...")
-                time.sleep(sleep_seconds)
-                
-                # Fetch latest
-                end_live = datetime.now(timezone.utc)
-                start_live = end_live - timedelta(days=2)
-                
-                h_live, l_live, _ = fetch_data(client, symbol, start_live, end_live)
-                if h_live is None: continue
-                
-                h_proc, l_proc = precompute_strategy_features(h_live, l_live)
-                
-                # Check the last 3 bars just in case of slight polling delay
-                latest_bars = l_proc.tail(3)
-                for _, row in latest_bars.iterrows():
-                    check_for_signal(row['timestamp'], h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
-                    
-        except KeyboardInterrupt:
-            print("\n🛑 Monitoring stopped by user.")
-            return
-
-    print("\n" + "="*80)
-    print("Analysis complete.")
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Live or Historical signal analysis for SPY/SLV")
+
+    parser = argparse.ArgumentParser(
+        description="Signal check using app.bot.generate_signal (kept in sync with live bot logic)."
+    )
     parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze")
-    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
+    parser.add_argument(
+        "--min-conf",
+        type=str,
+        choices=["all", "low", "medium", "high"],
+        default="all",
+        help="Minimum confidence level to display (default: all)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously check signal every interval (default: one-shot).",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Polling interval in seconds for --watch mode (default: 60).",
+    )
+    parser.add_argument(
+        "--scan-today",
+        action="store_true",
+        help="Replay today's closed 1m bars and report historical detections (non-live-parity mode).",
+    )
     args = parser.parse_args()
-    analyze_today_signals(args.symbol, args.min_conf)
+
+    if args.scan_today:
+        scan_today(args.symbol, args.min_conf)
+    else:
+        run(args.symbol, args.min_conf, args.watch, args.interval)
