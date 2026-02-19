@@ -1,23 +1,21 @@
 import sys
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
 
 # Add root directory to path to allow imports from app
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from app import config
 from app.bot import (
     generate_signal,
     get_confidence_label,
     precompute_strategy_features,
     get_causal_signal_from_precomputed,
+    get_bars,
 )
 
 
@@ -65,31 +63,15 @@ def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: i
         time.sleep(max(1, int(interval_sec)))
 
 
-def _fetch_for_scan(symbol: str, start_utc: datetime, end_utc: datetime):
-    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
-    for feed in ("sip", "iex"):
-        try:
-            htf_req = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-                start=start_utc,
-                end=end_utc,
-                feed=feed,
-            )
-            ltf_req = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                start=start_utc,
-                end=end_utc,
-                feed=feed,
-            )
-            htf_raw = client.get_stock_bars(htf_req).df
-            ltf_raw = client.get_stock_bars(ltf_req).df
-            if not htf_raw.empty and not ltf_raw.empty:
-                return htf_raw, ltf_raw, feed
-        except Exception:
-            continue
-    return None, None, None
+def _fetch_for_scan(symbol: str):
+    try:
+        htf_raw = get_bars(symbol, TimeFrame(15, TimeFrameUnit.Minute), 10000)
+        ltf_raw = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 10000)
+    except Exception:
+        return None, None, None
+    if htf_raw is None or ltf_raw is None or htf_raw.empty or ltf_raw.empty:
+        return None, None, None
+    return htf_raw, ltf_raw, "app.bot.get_bars"
 
 
 def scan_today(symbol: str, min_conf: str = "all"):
@@ -97,38 +79,34 @@ def scan_today(symbol: str, min_conf: str = "all"):
     symbol = symbol.upper()
     et = ZoneInfo("US/Eastern")
     now_et = datetime.now(et)
-    market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_open_et = now_et.replace(hour=9, minute=40, second=0, microsecond=0)
     market_open_utc = market_open_et.astimezone(timezone.utc)
-    end_utc = datetime.now(timezone.utc)
-    lookback_start = end_utc - timedelta(days=14)
+    market_close_et = now_et.replace(hour=15, minute=55, second=0, microsecond=0)
+    market_close_utc = market_close_et.astimezone(timezone.utc)
+    end_utc = min(datetime.now(timezone.utc), market_close_utc)
 
-    htf_raw, ltf_raw, feed = _fetch_for_scan(symbol, lookback_start, end_utc)
+    htf_raw, ltf_raw, feed = _fetch_for_scan(symbol)
     if htf_raw is None:
         print("❌ Could not fetch data for scan.")
         return
 
     htf, ltf = precompute_strategy_features(htf_raw, ltf_raw)
-    scan_rows = ltf[ltf["timestamp"] >= market_open_utc]
-    printed = {}
+    scan_rows = ltf[(ltf["timestamp"] >= market_open_utc) & (ltf["timestamp"] <= end_utc)]
     count = 0
 
-    print(f"Scan mode: historical replay since market open | feed={feed}")
+    print(f"Scan mode: historical replay in 09:40-15:55 ET | source={feed}")
     for _, row in scan_rows.iterrows():
         ts = row["timestamp"]
         res = get_causal_signal_from_precomputed(htf, ltf, ts, ltf_window=200)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
         if not signal or confidence < threshold:
             continue
-        key = (signal, pd.Timestamp(ts).floor("5min"))
-        if key in printed:
-            continue
-        printed[key] = True
         count += 1
         t_et = pd.Timestamp(ts).tz_convert(et).strftime("%I:%M %p")
         label = get_confidence_label(confidence)
         # put green light for buy, red light for sell, and double light for buy since it's more actionable
         emoji = "🟢" if signal == "buy" else "🔴"
-        print(f"${emoji} {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
+        print(f"{emoji} {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
 
     if count == 0:
         print("No historical signals detected since market open.")
