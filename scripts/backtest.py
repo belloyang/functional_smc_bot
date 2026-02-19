@@ -630,6 +630,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         position = 0
         active_trade = None
 
+    # Keep equity curve consistent with reported final balance after forced liquidation.
+    if equity_curve:
+        final_curve_time = locals().get('last_time_et', locals().get('current_time_et', ltf_data.index[-1].astimezone(ET)))
+        equity_curve.append({'time': final_curve_time, 'balance': balance})
+
     # --- ROUND TRIP STATISTICS ---
     # In this script, 'trades' contains entries and exits. 
     # Exits have 'pnl' field.
@@ -665,7 +670,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Calculate stats for the plot
         final_return_pct = ((balance - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
         peak_equity = df_equity['balance'].max()
-        max_profit = peak_equity - initial_balance
+        peak_return_pct = ((peak_equity - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
         
         # Drawdown calculation
         rolling_max = df_equity['balance'].cummax()
@@ -683,6 +688,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             f"Initial Balance: ${initial_balance:,.2f}\n"
             f"Final Balance: ${balance:,.2f}\n"
             f"Total Return: {final_return_pct:.2f}%\n"
+            f"Peak Return: {peak_return_pct:.2f}%\n"
             f"Max Drawdown: {max_drawdown_pct:.2f}%\n"
             f"Total Trades: {total_exit_trades}\n"
             f"Wins: {win_count} | Losses: {loss_count} | BE: {be_count}\n"
