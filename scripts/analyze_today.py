@@ -16,6 +16,7 @@ from app.bot import (
     precompute_strategy_features,
     get_causal_signal_from_precomputed,
     get_bars,
+    send_discord_notification
 )
 
 
@@ -51,7 +52,17 @@ def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: i
             emoji = "🟢" if signal == "buy" else "🔴"
             # In watch mode, avoid printing the exact same result repeatedly every poll.
             if not watch or key != last_seen_key:
-                print(f"{emoji} {line}")
+                
+                # Get current price for notification
+                try:
+                    bars = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 1)
+                    price = bars['close'].iloc[-1] if bars is not None and not bars.empty else 0
+                except Exception:
+                    price = 0
+                time_str = datetime.now(ZoneInfo("US/Eastern")).strftime("%I:%M %p")
+                bias = "BULLISH" if signal == "buy" else "BEARISH"
+                send_discord_notification(signal, price, time_str, symbol, bias, confidence)
+                print(f"{emoji} |price={price} | {line}")
             last_seen_key = key
         else:
             if not watch:
