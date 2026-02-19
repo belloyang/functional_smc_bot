@@ -50,9 +50,10 @@ def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: i
         if signal and confidence >= threshold:
             key = (signal, confidence)
             line = _format_signal_line(symbol, signal, confidence)
+            emoji = "🟢" if signal == "buy" else "🔴"
             # In watch mode, avoid printing the exact same result repeatedly every poll.
             if not watch or key != last_seen_key:
-                print(f"🚨 {line}")
+                print(f"{emoji} {line}")
             last_seen_key = key
         else:
             if not watch:
@@ -125,7 +126,9 @@ def scan_today(symbol: str, min_conf: str = "all"):
         count += 1
         t_et = pd.Timestamp(ts).tz_convert(et).strftime("%I:%M %p")
         label = get_confidence_label(confidence)
-        print(f"🚨 {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
+        # put green light for buy, red light for sell, and double light for buy since it's more actionable
+        emoji = "🟢" if signal == "buy" else "🔴"
+        print(f"${emoji} {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
 
     if count == 0:
         print("No historical signals detected since market open.")
