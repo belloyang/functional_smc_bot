@@ -1,253 +1,195 @@
-import pandas as pd
-import sys
-import os
 import asyncio
-from datetime import datetime, timedelta, timezone
+import os
+import sys
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-# Add root directory to path to allow imports from app
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from app import config
-from app.bot import (
-    get_bars, get_strategy_signal, detect_fvg, detect_order_block,
-    get_confidence_label, send_discord_notification
-)
-from app.ibkr_manager import ibkr_mgr
+import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-async def fetch_data_ibkr(symbol):
-    """Fetch HTF/LTF via the same IBKR path used by app.bot."""
-    htf_data = await get_bars(symbol, config.TIMEFRAME_HTF, 2000)
-    ltf_data = await get_bars(symbol, config.TIMEFRAME_LTF, 5000)
-    if htf_data.empty or ltf_data.empty:
-        return None, None
-    return htf_data, ltf_data
+# Add root directory to path to allow imports from app
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from app import config
+from app.bot import (
+    generate_signal,
+    get_confidence_label,
+    precompute_strategy_features,
+    get_causal_signal_from_precomputed,
+    get_bars,
+)
+from app.ibkr_manager import ibkr_mgr
 
 
-def fetch_data_alpaca(symbol, start_time, end_time):
-    """Fallback historical fetch using Alpaca."""
-    client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+CONF_THRESHOLDS = {
+    "all": 0,
+    "low": 20,
+    "medium": 50,
+    "high": 80,
+}
+
+
+def _format_signal_line(symbol: str, signal: str, confidence: int) -> str:
+    et = ZoneInfo("US/Eastern")
+    now_et = datetime.now(et).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    label = get_confidence_label(confidence)
+    return f"{now_et} | {symbol} | {signal.upper()} | confidence={confidence}% [{label}]"
+
+
+async def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: int = 60):
+    threshold = CONF_THRESHOLDS.get(min_conf, 0)
+    symbol = symbol.upper()
+    print("Signal source: app.bot.generate_signal")
+    print(f"Symbol: {symbol} | min_conf: {min_conf} ({threshold}) | watch: {watch}")
+
+    last_seen_key = None
+    while True:
+        res = await generate_signal(symbol)
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+
+        if signal and confidence >= threshold:
+            key = (signal, confidence)
+            line = _format_signal_line(symbol, signal, confidence)
+            emoji = "🟢" if signal == "buy" else "🔴"
+            if not watch or key != last_seen_key:
+                print(f"{emoji} {line}")
+            last_seen_key = key
+        else:
+            if not watch:
+                print("No signal.")
+
+        if not watch:
+            return
+
+        await asyncio.sleep(max(1, int(interval_sec)))
+
+
+def _fetch_alpaca_scan(symbol: str):
+    if not config.API_KEY or not config.API_SECRET:
+        return None, None, None
     try:
+        client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
+        end_utc = datetime.now(timezone.utc)
+        start_utc = end_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         htf_req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-            start=start_time,
-            end=end_time,
-            feed="iex"
+            start=start_utc,
+            end=end_utc,
+            feed="iex",
         )
         ltf_req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-            start=start_time,
-            end=end_time,
-            feed="iex"
+            start=start_utc,
+            end=end_utc,
+            feed="iex",
         )
-        htf_data = client.get_stock_bars(htf_req).df
-        ltf_data = client.get_stock_bars(ltf_req).df
-        if htf_data.empty or ltf_data.empty:
-            return None, None
-        return htf_data.reset_index(), ltf_data.reset_index()
+        htf_raw = client.get_stock_bars(htf_req).df
+        ltf_raw = client.get_stock_bars(ltf_req).df
+        if htf_raw.empty or ltf_raw.empty:
+            return None, None, None
+        return htf_raw.reset_index(), ltf_raw.reset_index(), "alpaca(iex)"
     except Exception:
-        return None, None
+        return None, None, None
 
-def process_bars(htf_df, ltf_df):
-    """
-    Pre-calculate all indicators on the full history to ensure stability.
-    """
-    htf = htf_df.reset_index() if 'timestamp' not in htf_df.columns else htf_df.copy()
-    ltf = ltf_df.reset_index() if 'timestamp' not in ltf_df.columns else ltf_df.copy()
-    if 'timestamp' not in htf.columns and 'date' in htf.columns:
-        htf = htf.rename(columns={'date': 'timestamp'})
-    if 'timestamp' not in ltf.columns and 'date' in ltf.columns:
-        ltf = ltf.rename(columns={'date': 'timestamp'})
 
-    # Normalize timestamps to tz-aware UTC for stable comparisons with scan_start_utc.
-    htf['timestamp'] = pd.to_datetime(htf['timestamp'], utc=True, errors='coerce')
-    ltf['timestamp'] = pd.to_datetime(ltf['timestamp'], utc=True, errors='coerce')
-    htf = htf.dropna(subset=['timestamp'])
-    ltf = ltf.dropna(subset=['timestamp'])
-    htf.set_index('timestamp', inplace=True)
-    ltf.set_index('timestamp', inplace=True)
-    htf.sort_index(inplace=True)
-    ltf.sort_index(inplace=True)
-    
-    # Calculate indicators ONCE on the full history
-    if 'ema50' not in htf.columns:
-        htf['ema50'] = htf['close'].ewm(span=50, adjust=False).mean()
-    
-    # LTF indicators
-    ltf = detect_fvg(ltf)
-    ltf = detect_order_block(ltf)
-    
-    return htf, ltf
+async def _fetch_for_scan(symbol: str):
+    try:
+        htf_raw = await get_bars(symbol, TimeFrame(15, TimeFrameUnit.Minute), 10000)
+        ltf_raw = await get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 10000)
+        if htf_raw is not None and ltf_raw is not None and not htf_raw.empty and not ltf_raw.empty:
+            return htf_raw, ltf_raw, "app.bot.get_bars"
+    except Exception:
+        pass
 
-def check_for_signal(timestamp, ltf_row, htf_data, ltf_data, ET, reported_signals, symbol, is_live=False, min_conf_val=0):
-    """Checks if a signal exists at a specific timestamp and prints if new."""
-    # To avoid look-ahead bias, HTF bias must be based on the last bar that CLOSED before 'timestamp'.
-    # In 15Min TF, at 10:00:00 AM, the 9:45:00 AM bar has just closed.
-    htf_causal = htf_data[htf_data.index <= (timestamp - timedelta(minutes=15))]
-    if len(htf_causal) < 50:
-        return False
-        
-    # Slicing the pre-processed dataframes is now safe because markers are already calculated.
-    ltf_slice = ltf_data[ltf_data.index <= timestamp].iloc[-200:]
-    
-    res = get_strategy_signal(htf_causal, ltf_slice)
-    if not res: return False
-    
-    signal_raw, confidence = res if isinstance(res, tuple) else (res, 0)
-    if signal_raw is None: return False
-    
-    # Check Confidence Threshold
-    if confidence < min_conf_val:
-        return False
-        
-    signal = signal_raw.upper()
-    
-    # Avoid duplicate printing within 5 minutes of same signal
-    sig_id = f"{signal}_{timestamp.date()}"
-    last_sig_time = reported_signals.get(sig_id)
-    
-    if last_sig_time and (timestamp - last_sig_time).total_seconds() < 300:
-        return False
-        
-    reported_signals[sig_id] = timestamp
-    time_et = timestamp.astimezone(ET).strftime("%I:%M %p")
-    
-    label = get_confidence_label(confidence)
-    last_htf = htf_causal.iloc[-1]
-    bias = "BULLISH" if last_htf['close'] > last_htf['ema50'] else "BEARISH"
-    
-    print(f"🚨 {signal} SIGNAL at {time_et} | Confidence: {confidence}% [{label}]")
-    print(f"   Price: ${ltf_row['close']:.2f}")
-    print(f"   HTF Bias: {bias} (EMA50: ${last_htf['ema50']:.2f})")
-    print(f"   LTF Logic: {'Bullish OB Impulse' if signal == 'BUY' else 'Bearish OB Impulse'}")
-    print("-" * 40)
-    
-    if is_live:
-        send_discord_notification(signal, ltf_row['close'], time_et, symbol, bias, confidence)
-        
-    return True
+    return _fetch_alpaca_scan(symbol)
 
-async def analyze_today_signals(symbol="SPY", min_conf_str="all", data_source="ibkr"):
-    ET = ZoneInfo("US/Eastern")
-    reported_signals = {} # To track and dedup signals
-    
-    # Map confidence choices to numeric thresholds
-    CONF_THRESHOLDS = {
-        'all': 0,
-        'low': 20,
-        'medium': 50,
-        'high': 80
-    }
-    min_conf_val = CONF_THRESHOLDS.get(min_conf_str, 0)
-    
-    now_et = datetime.now(ET)
-    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    
-    is_live = (market_open <= now_et <= market_close)
-    
-    if is_live:
-        print(f"🚀 [LIVE MODE] Monitoring {symbol} until market close ({market_close.strftime('%I:%M %p ET')})")
-    else:
-        print(f"📊 [HISTORICAL MODE] Analyzing {symbol} for today ({now_et.strftime('%Y-%m-%d')})")
-    print("="*80)
 
-    # 1. Initial Scan (From Open to Now)
-    scan_start = market_open if now_et >= market_open else (now_et - timedelta(days=1)).replace(hour=9, minute=30)
-    scan_start_utc = scan_start.astimezone(timezone.utc)
-    
-    print(f"Fetching data and scanning established signals since market open...")
-    
-    end_time_utc = datetime.now(timezone.utc)
-    lookback_start_utc = end_time_utc - timedelta(days=14) # 14 days for stable EMA50
-    
-    htf_raw, ltf_raw = (None, None)
-    if data_source == "ibkr":
-        htf_raw, ltf_raw = await fetch_data_ibkr(symbol)
-        if htf_raw is None:
-            print("⚠️ IBKR data fetch failed. Falling back to Alpaca.")
-            data_source = "alpaca"
-    if data_source == "alpaca":
-        htf_raw, ltf_raw = fetch_data_alpaca(symbol, lookback_start_utc, end_time_utc)
+async def scan_today(symbol: str, min_conf: str = "all"):
+    threshold = CONF_THRESHOLDS.get(min_conf, 0)
+    symbol = symbol.upper()
+    et = ZoneInfo("US/Eastern")
+    now_et = datetime.now(et)
+    market_open_et = now_et.replace(hour=9, minute=40, second=0, microsecond=0)
+    market_open_utc = market_open_et.astimezone(timezone.utc)
+    market_close_et = now_et.replace(hour=15, minute=55, second=0, microsecond=0)
+    market_close_utc = market_close_et.astimezone(timezone.utc)
+    end_utc = min(datetime.now(timezone.utc), market_close_utc)
+
+    htf_raw, ltf_raw, source = await _fetch_for_scan(symbol)
     if htf_raw is None:
-        print("❌ CRITICAL: Could not fetch market data from IBKR or Alpaca.")
+        print("❌ Could not fetch data for scan.")
         return
-    
-    htf_processed, ltf_processed = process_bars(htf_raw, ltf_raw)
-    
-    # Perform Scan
-    scan_bars = ltf_processed[ltf_processed.index >= scan_start_utc]
-    
-    signals_count = 0
-    for ts, row in scan_bars.iterrows():
-        if check_for_signal(ts, row, htf_processed, ltf_processed, ET, reported_signals, symbol, is_live=False, min_conf_val=min_conf_val):
-            signals_count += 1
-            
-    if signals_count == 0:
-        print("No historical signals detected today so far.")
+
+    htf, ltf = precompute_strategy_features(htf_raw, ltf_raw)
+    scan_rows = ltf[(ltf["timestamp"] >= market_open_utc) & (ltf["timestamp"] <= end_utc)]
+    count = 0
+
+    print(f"Scan mode: historical replay in 09:40-15:55 ET | source={source}")
+    for _, row in scan_rows.iterrows():
+        ts = row["timestamp"]
+        res = get_causal_signal_from_precomputed(htf, ltf, ts, ltf_window=200)
+        signal, confidence = res if isinstance(res, tuple) else (res, 0)
+        if not signal or confidence < threshold:
+            continue
+        count += 1
+        t_et = pd.Timestamp(ts).tz_convert(et).strftime("%I:%M %p")
+        label = get_confidence_label(confidence)
+        emoji = "🟢" if signal == "buy" else "🔴"
+        print(f"{emoji} {symbol} | {signal.upper()} at {t_et} | price={row['close']} | confidence={confidence}% [{label}]")
+
+    if count == 0:
+        print("No historical signals detected since market open.")
     else:
-        print(f"✅ Found {signals_count} historical signals today.")
+        print(f"✅ Historical signals found: {count}")
 
-    # 2. Live Monitoring Loop
-    if is_live:
-        print("\n" + "-"*80)
-        print(f"📡 Now monitoring {symbol} LIVE. Alerts will print as candles close.")
-        print("-" * 80)
-        
-        try:
-            while datetime.now(ET) <= market_close:
-                # Wait for next minute candle to close (plus small buffer)
-                now = datetime.now()
-                sleep_seconds = 61 - now.second
-                await asyncio.sleep(sleep_seconds)
-                
-                if data_source == "ibkr":
-                    h_live, l_live = await fetch_data_ibkr(symbol)
-                    if h_live is None:
-                        print("⚠️ IBKR live fetch failed. Switching to Alpaca fallback.")
-                        data_source = "alpaca"
-                else:
-                    h_live, l_live = (None, None)
-
-                if data_source == "alpaca" and h_live is None:
-                    end_live = datetime.now(timezone.utc)
-                    start_live = end_live - timedelta(days=14)
-                    h_live, l_live = fetch_data_alpaca(symbol, start_live, end_live)
-                if h_live is None: continue
-                
-                h_proc, l_proc = process_bars(h_live, l_live)
-                
-                # Check the last 3 bars just in case of slight polling delay
-                latest_bars = l_proc.iloc[-3:]
-                for ts, row in latest_bars.iterrows():
-                    check_for_signal(ts, row, h_proc, l_proc, ET, reported_signals, symbol, is_live=True, min_conf_val=min_conf_val)
-                    
-        except KeyboardInterrupt:
-            print("\n🛑 Monitoring stopped by user.")
-            return
-
-    print("\n" + "="*80)
-    print("Analysis complete.")
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Live or Historical signal analysis for SPY/SLV")
+
+    parser = argparse.ArgumentParser(
+        description="Signal check using app.bot.generate_signal (kept in sync with live bot logic)."
+    )
     parser.add_argument("symbol", nargs="?", default="SPY", help="Symbol to analyze")
-    parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to display/alert (default: all)")
+    parser.add_argument(
+        "--min-conf",
+        type=str,
+        choices=["all", "low", "medium", "high"],
+        default="all",
+        help="Minimum confidence level to display (default: all)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously check signal every interval (default: one-shot).",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Polling interval in seconds for --watch mode (default: 60).",
+    )
+    parser.add_argument(
+        "--scan-today",
+        action="store_true",
+        help="Replay today's closed 1m bars and report historical detections (non-live-parity mode).",
+    )
     args = parser.parse_args()
+
     async def _run():
         connected = await ibkr_mgr.connect()
-        source = "ibkr" if connected else "alpaca"
         if not connected:
-            print("⚠️ Failed to connect to IBKR. Using Alpaca fallback.")
+            print("⚠️ Failed to connect to IBKR. Using Alpaca fallback where possible.")
         try:
-            await analyze_today_signals(args.symbol, args.min_conf, data_source=source)
+            if args.scan_today:
+                await scan_today(args.symbol, args.min_conf)
+            else:
+                await run(args.symbol, args.min_conf, args.watch, args.interval)
         finally:
             if connected:
                 ibkr_mgr.disconnect()
+
     asyncio.run(_run())

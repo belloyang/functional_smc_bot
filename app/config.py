@@ -41,10 +41,19 @@ IBKR_HIST_BACKOFF_BASE_SEC = float(os.getenv("IBKR_HIST_BACKOFF_BASE_SEC", "1.0"
 # --- ALPACA (BACKWARD COMPATIBILITY) ---
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_API_SECRET")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")
+
+if not API_KEY or not API_SECRET:
+    print("WARNING: ALPACA_API_KEY or ALPACA_API_SECRET not found in environment variables.")
+
 BASE_URL = "https://paper-api.alpaca.markets"
 SYMBOL = "SPY" # default symbol
 TIMEFRAME_HTF = "15Min"
 TIMEFRAME_LTF = "1Min"
+
+# Note: TradingClient will fail if keys are None, but we catch it here
+trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
 
 RISK_PER_TRADE = 0.02  # 2% 
 try:
@@ -63,7 +72,3 @@ DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
 # --- DRAWDOWN & BEHAVIORAL SAFETY ---
 MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from peak
 COOL_DOWN_MINUTES = 15        # Wait period after any losing trade
-
-# --- NOTIFICATIONS ---
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")

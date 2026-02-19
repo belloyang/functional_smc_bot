@@ -1831,7 +1831,7 @@ async def main():
         print("❌ Error: --max-option-contracts must be -1 (unlimited) or >= 1.")
         sys.exit(1)
     
-    daily_cap = args.cap if args.cap is not None else 5
+    daily_cap = args.cap if args.cap is not None else getattr(config, 'DEFAULT_DAILY_CAP', 5)
     
     # Map confidence choices to numeric thresholds
     CONF_THRESHOLDS = {
