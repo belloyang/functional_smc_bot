@@ -18,6 +18,7 @@ import itertools
 import json
 import subprocess
 import sys
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -159,6 +160,33 @@ def build_command(python_bin: str, backtest_script: Path, job: BacktestJob) -> l
     return cmd
 
 
+def resolve_python_bin(raw: str | None) -> str:
+    """
+    Resolve a Python executable for subprocess on all platforms.
+    Priority:
+    1) user-supplied --python-bin if valid
+    2) current interpreter (sys.executable)
+    3) common launcher names on PATH
+    """
+    if raw:
+        if os.path.isabs(raw) and os.path.exists(raw):
+            return raw
+        found = shutil.which(raw)
+        if found:
+            return found
+        print(f"⚠️ Requested python binary not found: {raw}. Falling back to current interpreter.")
+
+    if sys.executable and os.path.exists(sys.executable):
+        return sys.executable
+
+    for candidate in ("python", "python3", "py"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    raise RuntimeError("Could not resolve a usable Python interpreter for subprocess.")
+
+
 def main() -> int:
     # Load environment variables from .env if it exists
     load_env()
@@ -173,12 +201,13 @@ def main() -> int:
     parser.add_argument("--max-option-contracts", type=int, help="Maximum option contracts per trade (-1 for unlimited)")
     parser.add_argument("--min-conf", type=str, choices=["all", "low", "medium", "high"], help="Signal confidence filter")
     parser.add_argument("--output-dir", type=str, help="Dedicated folder for this batch run")
-    parser.add_argument("--python-bin", type=str, default="python3.12", help="Python binary for backtest command")
+    parser.add_argument("--python-bin", type=str, default=None, help="Python binary for backtest command (default: current interpreter)")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
     backtest_script = repo_root / "scripts" / "backtest.py"
+    python_bin = resolve_python_bin(args.python_bin)
 
     cfg_path = Path(args.config).resolve() if args.config else None
     cfg = load_config(cfg_path)
@@ -201,7 +230,7 @@ def main() -> int:
 
     failures = 0
     for idx, job in enumerate(jobs, start=1):
-        cmd = build_command(args.python_bin, backtest_script, job)
+        cmd = build_command(python_bin, backtest_script, job)
         print(f"[{idx}/{len(jobs)}] {job.id_slug()}")
         print(" ", " ".join(cmd))
 
