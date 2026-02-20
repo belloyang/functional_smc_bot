@@ -3,6 +3,7 @@ import numpy as np
 # from scipy.stats import norm 
 import math
 import matplotlib.pyplot as plt
+import builtins
 from alpaca.data.historical import StockHistoricalDataClient
 
 def norm_cdf(x):
@@ -24,6 +25,20 @@ from app.bot import (
     precompute_strategy_features,
     get_causal_signal_from_precomputed,
 )
+
+
+def print(*args, **kwargs):  # noqa: A001
+    """Windows-safe print: fallback when console encoding can't render emojis."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        safe_args = []
+        for a in args:
+            if isinstance(a, str):
+                safe_args.append(a.encode("ascii", "replace").decode("ascii"))
+            else:
+                safe_args.append(a)
+        builtins.print(*safe_args, **kwargs)
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
