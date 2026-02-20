@@ -223,7 +223,7 @@ def main() -> int:
             failures += 1
             print(f"  -> FAIL (exit={proc.returncode}) log={log_path}")
         else:
-            print(f"  -> PASS log={log_path}")
+            print(f"  -> PASS log= {log_path}")
 
     print("-" * 60)
     print(f"Finished. failures={failures}, success={len(jobs) - failures}, total={len(jobs)}")
