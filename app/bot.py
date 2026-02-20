@@ -180,8 +180,6 @@ def calculate_confidence(ltf_row, last_htf, fvg_touch=False):
     score = 0
     
     # 1. Impulse Intensity & Volume (20%)
-    # Even on a pullback, we want to know the impulse that created the FVG was strong.
-    # We pass the ltf_row of the FVG creation candle, or just use the current pullback candle volume
     if ltf_row.get('avg_vol', 0) > 0:
         vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
         vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
@@ -203,7 +201,6 @@ def calculate_confidence(ltf_row, last_htf, fvg_touch=False):
             score += 10
             
     # 4. Trend Strength (ADX) (30%)
-    # Only award points if the trend is reasonably strong.
     adx = last_htf.get('adx', 0)
     if not pd.isna(adx):
         if adx >= 25:
@@ -349,25 +346,40 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     # Get last formed candle for signal check
     last_closed = ltf.iloc[-1]
     
+    # --- FALLING KNIFE / MOMENTUM PROTECTION ---
+    # Don't enter if the signal candle is a massive impulse AGAINST our bias.
+    # e.g. buying when a giant red candle just slammed into the FVG.
+    is_opposite_impulse = False
+    if last_closed.get('impulse', False):
+        if bias == "bullish" and last_closed['close'] < last_closed['open']:
+            is_opposite_impulse = True
+        elif bias == "bearish" and last_closed['close'] > last_closed['open']:
+            is_opposite_impulse = True
+            
+    # Volume Confirmation: Pullbacks on extreme volume are risky (reversal threat)
+    vol_ratio = 1.0
+    if last_closed.get('avg_vol', 0) > 0:
+        vol_ratio = last_closed['volume'] / last_closed['avg_vol']
+    
     signal = None
     confidence = 0
     fvg_touch = False
     
+    if is_opposite_impulse or vol_ratio > 2.0:
+        return None, 0
+
     # We look back over the last N candles to find a recent valid FVG/OB structure
     lookback = 15
     recent_ltf = ltf.iloc[-lookback-1:-1]
     
-    # Threshold for "close enough" to FVG (0.05% buffer)
+    # Threshold for "close enough" (Restored to 0.0005)
     buffer = 0.0005
     
     if bias == "bullish":
         # Search for a recent Bullish FVG associated with an Impulse/OB
         for i in range(len(recent_ltf) - 1, -1, -1):
             row = recent_ltf.iloc[i]
-            # Check if this candle is a Bull FVG. 
-            # We also check neighboring candles (within 2) for an OB to confirm intent.
             if row.get('bull_fvg', False):
-                # Is there an OB candle nearby (at i, i-1, or i-2)?
                 ob_nearby = any(recent_ltf.iloc[max(0, i-2):min(len(recent_ltf), i+1)]['is_bull_ob_candle'])
                 
                 if ob_nearby:
@@ -403,7 +415,6 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
                         break
 
     elif bias == "choppy":
-         # In a chopped market, we stand aside
          signal = None
 
     if signal:
