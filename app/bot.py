@@ -174,10 +174,10 @@ def calculate_confidence(ltf_row, last_htf):
     """Calculates a confidence score between 0-100%."""
     score = 0
     
-    # 1. Impulse Intensity (40%)
+    # 1. Impulse Intensity (30%)
     if ltf_row.get('avg_body', 0) > 0:
         ratio = ltf_row['body_size'] / ltf_row['avg_body']
-        impulse_score = min(40, max(0, (ratio - 1.5) / 1.5 * 40))
+        impulse_score = min(30, max(0, (ratio - 1.5) / 1.5 * 30))
         score += impulse_score
 
     # 2. Volume Confirmation (20%)
@@ -186,25 +186,36 @@ def calculate_confidence(ltf_row, last_htf):
         vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
         score += vol_score
         
-    # 3. FVG Confluence (20%)
+    # 3. FVG Confluence (15%)
     if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
-        score += 20
+        score += 15
         
-    # 4. Trend Proximity (20%)
+    # 4. Trend Proximity (10%)
     price = ltf_row['close']
     ema = last_htf.get('ema50')
     if ema:
         dist_pct = abs(price - ema) / ema
         if dist_pct < 0.002:
-            score += 20
-        elif dist_pct < 0.005:
             score += 10
-    
-    return int(min(100, score))
+        elif dist_pct < 0.005:
+            score += 5
+            
+    # 5. Trend Strength (ADX) (25%)
+    # Only award points if the trend is reasonably strong.
+    adx = last_htf.get('adx', 0)
+    if not pd.isna(adx):
+        if adx >= 25:
+            score += 25
+        elif adx > 20:
+            score += 10
+        elif adx < 15:
+            score -= 20 # Penalize very choppy markets
+            
+    return int(min(100, max(0, score)))
 
 def get_confidence_label(score):
     if score >= 80: return "🔥🔥 High"
-    if score >= 50: return "📈 Medium"
+    if score >= 60: return "📈 Medium"
     return "⚖️ Low"
 
 def send_discord_notification(signal, price, time_str, symbol, bias, confidence):
@@ -311,7 +322,17 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         
     # Check the LAST closed candle for bias. 
     last_htf = htf.iloc[-1]
-    bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
+    
+    # ADX Filter: If ADX is below 20, the market is considered choppy.
+    adx_val = last_htf.get('adx', 0)
+    is_choppy = False
+    if not pd.isna(adx_val) and adx_val < 20:
+        is_choppy = True
+        
+    if is_choppy:
+        bias = "choppy"
+    else:
+        bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
     
     # 2. LTF Analysis
     ltf = ltf.copy()
@@ -337,6 +358,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     elif bias == "bearish":
         if last_closed['is_bear_ob_candle']:
              signal = "sell"
+             
+    elif bias == "choppy":
+         # In a chopped market, we could implement mean reversion, but for now we stand aside
+         signal = None
 
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1])
@@ -363,6 +388,17 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
 
     if 'ema50' not in htf.columns:
         htf['ema50'] = ta.ema(htf['close'], length=50)
+
+    # Compute ADX for trend strength (using standard 14 period)
+    if 'adx' not in htf.columns:
+        # pandas_ta.adx returns a DataFrame with ADX_14, DMP_14, DMN_14
+        adx_df = ta.adx(htf['high'], htf['low'], htf['close'], length=14)
+        if adx_df is not None and not adx_df.empty:
+            # We just need the main ADX column. It's usually the first one 'ADX_14'
+            adx_col = [c for c in adx_df.columns if c.startswith('ADX')][0]
+            htf['adx'] = adx_df[adx_col]
+        else:
+            htf['adx'] = 0
 
     if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)
