@@ -125,7 +125,12 @@ def detect_fvg(df):
     # Create FVG columns. 
     # 'bull_fvg' at row `i` means an FVG formed between i-2 and i.
     df['bull_fvg'] = (df['low'] > df['high'].shift(2))
+    df['bull_fvg_top'] = df['low'] # The top of the gap is the low of candle i
+    df['bull_fvg_bottom'] = df['high'].shift(2) # The bottom of the gap is high of candle i-2
+    
     df['bear_fvg'] = (df['high'] < df['low'].shift(2))
+    df['bear_fvg_top'] = df['low'].shift(2) # The top of the gap is the low of candle i-2
+    df['bear_fvg_bottom'] = df['high'] # The bottom of the gap is high of candle i
     return df
 
 def detect_order_block(df):
@@ -170,41 +175,46 @@ def detect_structure_shift(df):
     # Not fully implemented in causal way for this snippet, relying on simpler OB/Impulse logic
     return df
 
-def calculate_confidence(ltf_row, last_htf):
+def calculate_confidence(ltf_row, last_htf, fvg_touch=False):
     """Calculates a confidence score between 0-100%."""
     score = 0
     
-    # 1. Impulse Intensity (40%)
-    if ltf_row.get('avg_body', 0) > 0:
-        ratio = ltf_row['body_size'] / ltf_row['avg_body']
-        impulse_score = min(40, max(0, (ratio - 1.5) / 1.5 * 40))
-        score += impulse_score
-
-    # 2. Volume Confirmation (20%)
+    # 1. Impulse Intensity & Volume (20%)
     if ltf_row.get('avg_vol', 0) > 0:
         vol_ratio = ltf_row['volume'] / ltf_row['avg_vol']
         vol_score = min(20, max(0, (vol_ratio - 1.0) / 1.0 * 20))
         score += vol_score
         
-    # 3. FVG Confluence (20%)
-    if ltf_row.get('bull_fvg') or ltf_row.get('bear_fvg'):
-        score += 20
+    # 2. FVG Pullback Confluence (30%)
+    if fvg_touch:
+        score += 30
         
-    # 4. Trend Proximity (20%)
+    # 3. Trend Proximity (20%)
     price = ltf_row['close']
     ema = last_htf.get('ema50')
     if ema:
         dist_pct = abs(price - ema) / ema
-        if dist_pct < 0.002:
+        # Pullbacks often touch or get close to the EMA.
+        if dist_pct < 0.003:
             score += 20
         elif dist_pct < 0.005:
             score += 10
-    
-    return int(min(100, score))
+            
+    # 4. Trend Strength (ADX) (30%)
+    adx = last_htf.get('adx', 0)
+    if not pd.isna(adx):
+        if adx >= 25:
+            score += 30
+        elif adx > 20:
+            score += 15
+        elif adx < 15:
+            score -= 20 # Penalize very choppy markets
+            
+    return int(min(100, max(0, score)))
 
 def get_confidence_label(score):
     if score >= 80: return "🔥🔥 High"
-    if score >= 50: return "📈 Medium"
+    if score >= 60: return "📈 Medium"
     return "⚖️ Low"
 
 def send_discord_notification(signal, price, time_str, symbol, bias, confidence):
@@ -311,7 +321,17 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         
     # Check the LAST closed candle for bias. 
     last_htf = htf.iloc[-1]
-    bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
+    
+    # ADX Filter: If ADX is below 20, the market is considered choppy.
+    adx_val = last_htf.get('adx', 0)
+    is_choppy = False
+    if not pd.isna(adx_val) and adx_val < 20:
+        is_choppy = True
+        
+    if is_choppy:
+        bias = "choppy"
+    else:
+        bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
     
     # 2. LTF Analysis
     ltf = ltf.copy()
@@ -326,20 +346,79 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     # Get last formed candle for signal check
     last_closed = ltf.iloc[-1]
     
+    # --- FALLING KNIFE / MOMENTUM PROTECTION ---
+    # Don't enter if the signal candle is a massive impulse AGAINST our bias.
+    # e.g. buying when a giant red candle just slammed into the FVG.
+    is_opposite_impulse = False
+    if last_closed.get('impulse', False):
+        if bias == "bullish" and last_closed['close'] < last_closed['open']:
+            is_opposite_impulse = True
+        elif bias == "bearish" and last_closed['close'] > last_closed['open']:
+            is_opposite_impulse = True
+            
+    # Volume Confirmation: Pullbacks on extreme volume are risky (reversal threat)
+    vol_ratio = 1.0
+    if last_closed.get('avg_vol', 0) > 0:
+        vol_ratio = last_closed['volume'] / last_closed['avg_vol']
+    
     signal = None
     confidence = 0
+    fvg_touch = False
+    
+    if is_opposite_impulse or vol_ratio > 2.0:
+        return None, 0
+
+    # We look back over the last N candles to find a recent valid FVG/OB structure
+    lookback = 15
+    recent_ltf = ltf.iloc[-lookback-1:-1]
+    
+    # Threshold for "close enough" (Restored to 0.0005)
+    buffer = 0.0005
     
     if bias == "bullish":
-        # Trigger: We just had a bullish impulse (OB creation)
-        if last_closed['is_bull_ob_candle']:
-             signal = "buy"
+        # Search for a recent Bullish FVG associated with an Impulse/OB
+        for i in range(len(recent_ltf) - 1, -1, -1):
+            row = recent_ltf.iloc[i]
+            if row.get('bull_fvg', False):
+                ob_nearby = any(recent_ltf.iloc[max(0, i-2):min(len(recent_ltf), i+1)]['is_bull_ob_candle'])
+                
+                if ob_nearby:
+                    fvg_top = row['bull_fvg_top']
+                    fvg_bot = row['bull_fvg_bottom']
+                    
+                    # Entry condition: Price pulls back to touch or get very close to FVG top
+                    # But must stay above FVG bottom (structure preservation)
+                    px_limit_top = fvg_top * (1 + buffer)
+                    px_limit_bot = fvg_bot * (1 - buffer)
+                    
+                    if last_closed['low'] <= px_limit_top and last_closed['close'] > px_limit_bot:
+                        signal = "buy"
+                        fvg_touch = True
+                        break
              
     elif bias == "bearish":
-        if last_closed['is_bear_ob_candle']:
-             signal = "sell"
+        for i in range(len(recent_ltf) - 1, -1, -1):
+            row = recent_ltf.iloc[i]
+            if row.get('bear_fvg', False):
+                ob_nearby = any(recent_ltf.iloc[max(0, i-2):min(len(recent_ltf), i+1)]['is_bear_ob_candle'])
+                
+                if ob_nearby:
+                    fvg_top = row['bear_fvg_top']
+                    fvg_bot = row['bear_fvg_bottom']
+                    
+                    px_limit_top = fvg_top * (1 + buffer)
+                    px_limit_bot = fvg_bot * (1 - buffer)
+                    
+                    if last_closed['high'] >= px_limit_bot and last_closed['close'] < px_limit_top:
+                        signal = "sell"
+                        fvg_touch = True
+                        break
+
+    elif bias == "choppy":
+         signal = None
 
     if signal:
-        confidence = calculate_confidence(last_closed, htf.iloc[-1])
+        confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
 
     return signal, confidence
 
@@ -363,6 +442,17 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
 
     if 'ema50' not in htf.columns:
         htf['ema50'] = ta.ema(htf['close'], length=50)
+
+    # Compute ADX for trend strength (using standard 14 period)
+    if 'adx' not in htf.columns:
+        # pandas_ta.adx returns a DataFrame with ADX_14, DMP_14, DMN_14
+        adx_df = ta.adx(htf['high'], htf['low'], htf['close'], length=14)
+        if adx_df is not None and not adx_df.empty:
+            # We just need the main ADX column. It's usually the first one 'ADX_14'
+            adx_col = [c for c in adx_df.columns if c.startswith('ADX')][0]
+            htf['adx'] = adx_df[adx_col]
+        else:
+            htf['adx'] = 0
 
     if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)
