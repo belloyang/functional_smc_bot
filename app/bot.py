@@ -346,10 +346,17 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         else:
             bias = "choppy" # Inside the noise band
 
-        # --- EXTENSION FILTER ---
-        # Don't chase trends if price is already significantly extended from the EMA.
+        # --- BALANCED EXTENSION FILTER ---
+        # Don't chase trends if price is already significantly extended, UNLESS the move is parabolic.
         dist_from_ema = abs(price - ema)
-        if dist_from_ema > 2.0 * atr:
+        
+        # Parabolic Override: If ADX is extremely high (> 40), extension is a sign of strength, not exhaustion.
+        is_parabolic = adx_val > 40
+        
+        # Buffer relaxed to 3.0x ATR for balanced momentum capture
+        extension_limit = 3.0 * atr
+        
+        if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
     
     # 2. LTF Analysis
