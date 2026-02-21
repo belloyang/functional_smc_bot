@@ -53,15 +53,16 @@ def get_stats(symbol, days=180):
         "Samples": len(df)
     }
 
-spy = get_stats("SPY")
-qqq = get_stats("QQQ")
+tickers = ["QQQ", "SPY", "NVDA", "TSLA", "SMH", "XLK", "AMD", "MSFT"]
+stats = [get_stats(ticker, days=365) for ticker in tickers]
 
-print("\n--- PERFORMANCE DYNAMICS ANALYSIS ---")
-results = pd.DataFrame([spy, qqq])
-print(results)
+print("\n--- MULTI-ASSET PERFORMANCE DYNAMICS (365 DAYS) ---")
+results = pd.DataFrame(stats)
+print(results.sort_values(by="% ADX > 25 (Strong Trend)", ascending=False))
 
-# Interpretation
-diff_adx = qqq['% ADX > 25 (Strong Trend)'] - spy['% ADX > 25 (Strong Trend)']
+# Look for best assets
+df_results = pd.DataFrame(stats)
+print(df_results.sort_values(by="% ADX > 25 (Strong Trend)", ascending=False).to_string())
 diff_flips = spy['EMA Flips per Day'] - qqq['EMA Flips per Day']
 
 print("\n--- KEY FINDINGS ---")

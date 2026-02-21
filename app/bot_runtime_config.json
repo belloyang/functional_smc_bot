@@ -3,7 +3,7 @@
   "options": true,
   "cap": 5,
   "session_duration": 6,
-  "min_conf": "low",
+  "min_conf": "medium",
   "state_file": "trade_state_QQQ.json",
   "option_allocation": 0.15,
   "max_option_contracts": -1
