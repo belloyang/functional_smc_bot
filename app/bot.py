@@ -345,6 +345,12 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
             bias = "bearish"
         else:
             bias = "choppy" # Inside the noise band
+
+        # --- EXTENSION FILTER ---
+        # Don't chase trends if price is already significantly extended from the EMA.
+        dist_from_ema = abs(price - ema)
+        if dist_from_ema > 2.0 * atr:
+            return None, 0
     
     # 2. LTF Analysis
     ltf = ltf.copy()
@@ -434,6 +440,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
 
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
+        # --- CONFIDENCE FLOOR ---
+        # Discard "Low Confidence" signals (below 60%) to improve overall win rate.
+        if confidence < 60:
+            return None, 0
 
     return signal, confidence
 
