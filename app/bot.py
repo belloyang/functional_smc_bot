@@ -353,8 +353,8 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         # Parabolic Override: If ADX is extremely high (> 40), extension is a sign of strength, not exhaustion.
         is_parabolic = adx_val > 40
         
-        # Buffer relaxed to 3.0x ATR for balanced momentum capture
-        extension_limit = 3.0 * atr
+        # Buffer relaxed to 2.5x ATR for balanced momentum capture (Tightened from 3.0x)
+        extension_limit = 2.5 * atr
         
         if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
