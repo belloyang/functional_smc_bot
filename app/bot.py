@@ -532,16 +532,42 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         
     last_htf = htf.iloc[-1]
     
-    # ADX Filter: If ADX is below 20, the market is considered choppy.
+    # ADX Filter: Require stronger trend for entry (Raised from 20 to 25)
     adx_val = last_htf.get('adx', 0)
     is_choppy = False
-    if not pd.isna(adx_val) and adx_val < 20:
+    if not pd.isna(adx_val) and adx_val < 25:
         is_choppy = True
         
     if is_choppy:
         bias = "choppy"
     else:
-        bias = "bullish" if last_htf['close'] > last_htf['ema50'] else "bearish"
+        # Bias Hysteresis: Use ATR to scale the buffer (10% of ATR)
+        price = last_htf['close']
+        ema = last_htf['ema50']
+        atr = last_htf.get('atr', price * 0.001) 
+        
+        buffer = 0.1 * (atr / price)
+        buffer = max(0.0002, min(0.001, buffer)) # Sanity bounds (0.02% to 0.1%)
+        
+        if price > (ema + buffer):
+            bias = "bullish"
+        elif price < (ema - buffer):
+            bias = "bearish"
+        else:
+            bias = "choppy" # Inside the noise band
+
+        # --- BALANCED EXTENSION FILTER ---
+        # Don't chase trends if price is already significantly extended, UNLESS the move is parabolic.
+        dist_from_ema = abs(price - ema)
+        
+        # Parabolic Override: If ADX is extremely high (> 40), extension is a sign of strength, not exhaustion.
+        is_parabolic = adx_val > 40
+        
+        # Buffer relaxed to 2.5x ATR for balanced momentum capture (Tightened from 3.0x)
+        extension_limit = 2.5 * atr
+        
+        if dist_from_ema > extension_limit and not is_parabolic:
+            return None, 0
     
     # 2. LTF Analysis
     ltf = ltf.copy()
@@ -629,6 +655,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
 
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
+        # --- CONFIDENCE FLOOR ---
+        # Discard "Low Confidence" signals (below 60%) to improve overall win rate.
+        if confidence < 60:
+            return None, 0
 
     return signal, confidence
 
@@ -663,6 +693,9 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
             htf['adx'] = adx_df[adx_col]
         else:
             htf['adx'] = 0
+
+    if 'atr' not in htf.columns:
+        htf['atr'] = htf.ta.atr(length=14)
 
     if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)

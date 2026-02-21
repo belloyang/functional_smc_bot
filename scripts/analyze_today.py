@@ -46,6 +46,18 @@ async def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_
 
     last_seen_key = None
     while True:
+        # --- MARKET HOURS CHECK ---
+        et = ZoneInfo("US/Eastern")
+        now_et = datetime.now(et)
+        is_weekend = now_et.weekday() >= 5
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+
+        if watch and (is_weekend or now_et < market_open or now_et > market_close):
+            reason = "Weekend" if is_weekend else "Outside 9:30 AM - 4:00 PM ET"
+            print(f"[{now_et.strftime('%I:%M %p')}] 🛑 {reason}. Exiting --watch mode.")
+            return
+
         res = await generate_signal(symbol)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
 
