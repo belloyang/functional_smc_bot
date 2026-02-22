@@ -563,8 +563,9 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         # Parabolic Override: If ADX is extremely high (> 40), extension is a sign of strength, not exhaustion.
         is_parabolic = adx_val > 40
         
-        # Buffer relaxed to 2.5x ATR for balanced momentum capture (Tightened from 3.0x)
-        extension_limit = 2.5 * atr
+        # Buffer kept at 3.0x ATR for balanced momentum capture
+        # NOTE: 2.5x was too tight and blocked entries during strong summer 2025 QQQ trend
+        extension_limit = 3.0 * atr
         
         if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
@@ -608,8 +609,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     lookback = 15
     recent_ltf = ltf.iloc[-lookback-1:-1]
     
-    # Threshold for "close enough" (Restored to 0.0005)
-    buffer = 0.0005
+    # Threshold for "close enough" (Scaled with volatility)
+    atr = last_htf.get('atr', last_closed['close'] * 0.005)
+    buffer = 0.1 * (atr / last_closed['close'])
+    buffer = max(0.0002, min(0.001, buffer)) # Sanity bounds
     
     if bias == "bullish":
         # Search for a recent Bullish FVG associated with an Impulse/OB
@@ -656,8 +659,9 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
         # --- CONFIDENCE FLOOR ---
-        # Discard "Low Confidence" signals (below 60%) to improve overall win rate.
-        if confidence < 60:
+        # Discard very "Low Confidence" signals below 40% to filter clear noise.
+        # NOTE: 60% was too aggressive and blocked 70% of valid trend entries in summer 2025.
+        if confidence < 40:
             return None, 0
 
     return signal, confidence
