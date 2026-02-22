@@ -3,6 +3,7 @@ import numpy as np
 # from scipy.stats import norm 
 import math
 import matplotlib.pyplot as plt
+import builtins
 from alpaca.data.historical import StockHistoricalDataClient
 
 def norm_cdf(x):
@@ -24,6 +25,20 @@ from app.bot import (
     precompute_strategy_features,
     get_causal_signal_from_precomputed,
 )
+
+
+def print(*args, **kwargs):  # noqa: A001
+    """Windows-safe print: fallback when console encoding can't render emojis."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        safe_args = []
+        for a in args:
+            if isinstance(a, str):
+                safe_args.append(a.encode("ascii", "replace").decode("ascii"))
+            else:
+                safe_args.append(a)
+        builtins.print(*safe_args, **kwargs)
 
 def black_scholes_price(S, K, T, r, sigma, type='call'):
     """
@@ -630,7 +645,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     
                     if pnl < 0:
                         last_flip_loss_time = current_time_utc # Trigger Anti-Chaser
-                    
+                        
                     position = 0
                     active_trade = None
 
@@ -651,21 +666,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             time_held = last_time_utc - active_trade['entry_time']
             days_passed = time_held.total_seconds() / (24 * 3600)
             T_remain = max(0, (active_trade['expiry_days'] - days_passed) / 365.0)
-            
-            # Fix: Use volatility from the last processed timestamp (index), not the end of the dataset
-            # htf_data uses timestamp as index
-            match_row = htf_data[htf_data.index <= last_time_utc]
-            if not match_row.empty:
-                 sigma = match_row.iloc[-1]['volatility']
-            else:
-                 sigma = 0.20 # Fallback
-            
+            # Use last available volatility
+            sigma = htf_data.iloc[-1]['volatility']
             exit_premium = black_scholes_price(last_price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
             pnl = (exit_premium - entry_price) * 100 * abs(position)
             balance += exit_premium * 100 * abs(position)
             trades.append({'time': last_time_et, 'type': f'mtm_{active_trade["type"]}', 'price': exit_premium, 'qty': abs(position), 'pnl': pnl})
         position = 0
         active_trade = None
+
+    # Keep equity curve consistent with reported final balance after forced liquidation.
+    if equity_curve:
+        final_curve_time = locals().get('last_time_et', locals().get('current_time_et', ltf_data.index[-1].astimezone(ET)))
+        equity_curve.append({'time': final_curve_time, 'balance': balance})
 
     # --- ROUND TRIP STATISTICS ---
     # In this script, 'trades' contains entries and exits. 
@@ -702,7 +715,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         # Calculate stats for the plot
         final_return_pct = ((balance - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
         peak_equity = df_equity['balance'].max()
-        max_profit = peak_equity - initial_balance
+        peak_return_pct = ((peak_equity - initial_balance) / initial_balance) * 100 if initial_balance > 0 else 0
         
         # Drawdown calculation
         rolling_max = df_equity['balance'].cummax()
@@ -720,6 +733,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             f"Initial Balance: ${initial_balance:,.2f}\n"
             f"Final Balance: ${balance:,.2f}\n"
             f"Total Return: {final_return_pct:.2f}%\n"
+            f"Peak Return: {peak_return_pct:.2f}%\n"
             f"Max Drawdown: {max_drawdown_pct:.2f}%\n"
             f"Total Trades: {total_exit_trades}\n"
             f"Wins: {win_count} | Losses: {loss_count} | BE: {be_count}\n"
