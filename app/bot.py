@@ -1538,6 +1538,108 @@ class TradingSession:
             'pnl': pnl,
             'win': pnl > 0
         })
+
+    def _get_closed_trades_today_stats(self):
+        """
+        Reconstruct today's closed trade outcomes from filled closed orders.
+        Uses FIFO matching of buy->sell lots per symbol/asset_class.
+        """
+        ET = ZoneInfo("US/Eastern")
+        now_utc = datetime.now(timezone.utc)
+        start_today_et = datetime.now(ET).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_today_utc = start_today_et.astimezone(timezone.utc)
+
+        try:
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                limit=500,
+                after=start_today_utc,
+                until=now_utc,
+                nested=True,
+            )
+            orders = trade_client.get_orders(req)
+        except Exception:
+            return {
+                "count": 0,
+                "wins": 0,
+                "losses": 0,
+                "breakeven": 0,
+                "realized_pnl": 0.0,
+            }
+
+        # Seed lots from opening positions so sells today can close previously-opened positions.
+        lots = {}
+        for pos in self.opening_positions:
+            symbol = pos.get('symbol', '')
+            is_option = bool(re.match(r'^[A-Z]+\d{6}[CP]\d{8}$', symbol))
+            key = (symbol, 'us_option' if is_option else 'us_equity')
+            qty = abs(float(pos.get('qty', 0.0)))
+            if qty <= 0:
+                continue
+            lots.setdefault(key, []).append({
+                "qty": qty,
+                "price": float(pos.get('entry_price', 0.0)),
+            })
+
+        realized = []
+        # Process in fill-time order for deterministic FIFO matching.
+        filled_orders = sorted(
+            [
+                o for o in orders
+                if getattr(o, 'filled_at', None) is not None
+                and float(getattr(o, 'filled_qty', 0) or 0) > 0
+                and float(getattr(o, 'filled_avg_price', 0) or 0) > 0
+            ],
+            key=lambda o: o.filled_at
+        )
+
+        for o in filled_orders:
+            symbol = getattr(o, 'symbol', None)
+            asset_class_raw = str(getattr(o, 'asset_class', '')).lower()
+            asset_class = 'us_option' if 'option' in asset_class_raw else 'us_equity'
+            side = str(getattr(o, 'side', '')).lower()
+            qty = abs(float(getattr(o, 'filled_qty', 0) or 0))
+            px = float(getattr(o, 'filled_avg_price', 0) or 0)
+            if not symbol or qty <= 0 or px <= 0:
+                continue
+
+            key = (symbol, asset_class)
+            multiplier = 100.0 if asset_class == 'us_option' else 1.0
+
+            if side == 'buy':
+                lots.setdefault(key, []).append({"qty": qty, "price": px})
+                continue
+
+            if side != 'sell':
+                continue
+
+            remaining = qty
+            sell_pnl = 0.0
+            matched = 0.0
+            queue = lots.setdefault(key, [])
+            while remaining > 1e-9 and queue:
+                lot = queue[0]
+                take = min(remaining, lot["qty"])
+                sell_pnl += (px - lot["price"]) * take * multiplier
+                lot["qty"] -= take
+                remaining -= take
+                matched += take
+                if lot["qty"] <= 1e-9:
+                    queue.pop(0)
+
+            if matched > 0:
+                realized.append(sell_pnl)
+
+        wins = sum(1 for p in realized if p > 0.01)
+        losses = sum(1 for p in realized if p < -0.01)
+        breakeven = sum(1 for p in realized if -0.01 <= p <= 0.01)
+        return {
+            "count": len(realized),
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "realized_pnl": sum(realized),
+        }
         
     def should_continue(self):
         """Check if the session should continue running."""
@@ -1560,10 +1662,12 @@ class TradingSession:
         
         # Get current account state
         closing_equity = 0.0
+        account_equity_valid = False
         closing_positions = []
         try:
             account = trade_client.get_account()
             closing_equity = float(account.equity)
+            account_equity_valid = closing_equity > 0
             
             positions = trade_client.get_all_positions()
             for pos in positions:
@@ -1581,6 +1685,14 @@ class TradingSession:
             print(f"⚠️ Could not fetch closing state: {e}")
         
         # Calculate statistics
+        closed_today = self._get_closed_trades_today_stats()
+        opening_unrealized = sum(float(p.get('unrealized_pl', 0.0)) for p in self.opening_positions)
+        closing_unrealized = sum(float(p.get('unrealized_pl', 0.0)) for p in closing_positions)
+
+        # Fallback when broker equity is missing/invalid (avoid bogus -100% report).
+        if self.opening_equity and not account_equity_valid:
+            closing_equity = self.opening_equity + closed_today["realized_pnl"] + (closing_unrealized - opening_unrealized)
+
         total_pnl = closing_equity - self.opening_equity if self.opening_equity else 0.0
         pnl_pct = (total_pnl / self.opening_equity * 100) if self.opening_equity else 0.0
         
@@ -1617,7 +1729,8 @@ class TradingSession:
             "TRADING ACTIVITY",
             "-" * 60,
             f"Trades Executed: {self.trades_executed}",
-            f"Trades Closed:   {len(self.closed_trades)}",
+            f"Trades Closed:   {closed_today['count']}",
+            f"Today W/L/BE:    {closed_today['wins']} / {closed_today['losses']} / {closed_today['breakeven']}",
         ]
         
         if self.closed_trades:
