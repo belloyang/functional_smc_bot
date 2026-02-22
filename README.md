@@ -1,89 +1,118 @@
 # Alpaca Trading Bot
 
-This is a trading bot that uses Alpaca API to trade stocks and options.
+Trading and backtesting bot for US stocks/options with SMC-style signal logic.
 
 ## Features
-- Backtesting with separate stock/option allocation
-- Option trading with dynamic budgeting
-- Stock trading with risk-based sizing
-- Multi-instance safety (Run multiple tickers concurrently)
-- Risk management (Daily caps, Per-ticker limits)
-- Order management (Bracket orders with TP/SL)
+- Live bot for stock or option mode
+- Backtest engine using the same strategy functions as the live bot
+- Runtime bot config via JSON file (`--config`)
+- Batch backtest runner with config-driven `jobs`
+- Risk controls: daily trade cap, option allocation, confidence filter, session limits
 
 ## Prerequisites
-
 - Python 3.12
-- Alpaca API key & secret (Paper or Live)
+- Alpaca API key and secret
 
 ## Installation
 ```bash
 python3.12 -m pip install -r requirements.txt
 ```
 
-## Configuration
-Update `app/config.py` for global defaults:
-- `STOCK_ALLOCATION_PCT`: Max % of equity for stock positions per ticker (default: 0.80).
-- `OPTIONS_ALLOCATION_PCT`: Max % of equity for all option premiums (Global) (default: 0.20).
-- `DEFAULT_DAILY_CAP`: Max number of trades per ticker per day.
+## Environment variables
+The project loads `.env` from the current working directory through `app/config.py`.
 
-Set your Alpaca API credentials:
-```bash
-export ALPACA_API_KEY="your_key"
-export ALPACA_API_SECRET="your_secret"
+Example `.env`:
+```env
+ALPACA_API_KEY=your_key
+ALPACA_API_SECRET=your_secret
+DISCORD_WEBHOOK_URL=
+DISCORD_WEBHOOK_URL_LIVE_TRADING=
 ```
 
-# Run backtest
-## Options
-```bash
-python3.12 scripts/backtest.py QQQ --options --days 90 --balance 2500
-```
+Important:
+- Run commands from repo root so `.env` is found.
+- Use `KEY=value` format in `.env` (not `export KEY=value`).
 
-## Stocks
+## Global defaults
+You can adjust defaults in `app/config.py`:
+- `OPTIONS_ALLOCATION_PCT`
+- `DEFAULT_DAILY_CAP`
+- `RISK_PER_TRADE` (default `0.01`, i.e. 1%)
+
+## Run backtest
+Stock mode:
 ```bash
 python3.12 scripts/backtest.py QQQ --days 90 --balance 2500
 ```
 
-### Parameters
-- `--days`: Number of days to backtest (default: 30)
-- `--balance`: Initial account balance (default: 10000.0)
-- `--options`: Run with options simulation instead of stock
-- `--cap`: Daily trade cap (-1 for unlimited)
-- `--stock-budget`: % of balance for stock sizing (default: 0.80)
-- `--option-budget`: % of balance for option sizing (default: 0.20)
-
-# Run live trading
-
-## Multi-Instance Support
-You can run multiple instances of the bot for different tickers concurrently. By default, each uses 80% of capital, so for multiple instances you **must** manual allocate to share capital:
+Option mode:
 ```bash
-python3.12 -m app.bot SPY --stock-budget 0.40 &
-python3.12 -m app.bot QQQ --stock-budget 0.40 &
-```
-Each instance respects the `MAX_TICKER_ALLOCATION` (default 80%) unless overridden.
-
-## Session Management
-### Run for a specific duration
-```bash
-# Run for 2 hours
-python3.12 -m app.bot QQQ --session-duration 2
+python3.12 scripts/backtest.py QQQ --options --days 90 --balance 2500
 ```
 
-### Limit number of trades
+Common params:
+- `--days`
+- `--balance`
+- `--options`
+- `--cap`
+- `--option-allocation` (stock allocation is `1 - option-allocation`)
+- `--max-option-contracts` (`-1` for unlimited, default)
+- `--min-conf` (`all|low|medium|high`)
+
+## Run batch backtests
+Use `scripts/run_backtests.py` with either config or CLI lists.
+
+Config file example:
 ```bash
-# Run until 5 trades are executed
-python3.12 -m app.bot QQQ --max-trades 5
+python3.12 scripts/run_backtests.py --config scripts/backtest_batch_config.json
 ```
 
-### Graceful shutdown
-Press `Ctrl+C` to gracefully stop the bot and see a session summary.
+Direct CLI example:
+```bash
+python3.12 scripts/run_backtests.py --symbols SPY,QQQ --days 30,90 --balances 2500,10000 --modes stock,options
+```
 
-### All Parameters
-- `symbol`: Symbol to trade (default: SPY)
-- `--options`: Enable options trading
-- `--cap`: Daily trade cap (-1 for unlimited)
-- `--session-duration`: Session duration in hours
-- `--max-trades`: Maximum number of trades per session
-- `--stock-budget`: Manual % allocation for stock mode (overrides config)
-- `--option-budget`: Manual % allocation for option mode (overrides config)
+Notes:
+- If `jobs` exists in config, it takes precedence over cartesian `symbols/days/balances/modes`.
+- Logs are written under `<output>/logs`.
+- Backtest charts are written under `<output>/backtest-output`.
 
+## Run live bot
+Basic:
+```bash
+python3.12 -m app.bot QQQ
+```
 
+Option mode:
+```bash
+python3.12 -m app.bot QQQ --options
+```
+
+With runtime JSON config:
+```bash
+python3.12 -m app.bot --config app/bot_runtime_config.json
+```
+
+You can still override config-file values from CLI:
+```bash
+python3.12 -m app.bot --config app/bot_runtime_config.json --min-conf high --cap 2
+```
+
+Supported runtime JSON keys:
+- `symbol`
+- `options` or `enable_options`
+- `cap` or `daily_cap`
+- `session_duration` or `session-duration`
+- `option_allocation` or `option-allocation` (stock allocation is `1 - option-allocation`)
+- `max_option_contracts` or `max-option-contracts` (`-1` for unlimited)
+- `state_file` or `state-file`
+- `min_conf` (`all|low|medium|high`)
+
+## Multi-instance example
+```bash
+python3.12 -m app.bot SPY --option-allocation 0.60 &
+python3.12 -m app.bot QQQ --option-allocation 0.60 &
+```
+
+## Graceful shutdown
+Press `Ctrl+C` to stop and print a session summary.
