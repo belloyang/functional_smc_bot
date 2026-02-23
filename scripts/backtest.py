@@ -318,8 +318,13 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # 3. Active Management (Hybrid Trailing)
                 pl_pct = (current_option_price - entry_price) / entry_price
                 
-                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%
-                if pl_pct >= 0.30:
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%, +40% -> +30%
+                if pl_pct >= 0.40:
+                    lock_price = entry_price * 1.30 # +30% SL
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +30% ({lock_price:.2f})")
+                elif pl_pct >= 0.30:
                     lock_price = entry_price * 1.20 # +20% SL
                     if active_trade['stop_loss'] < lock_price:
                         active_trade['stop_loss'] = lock_price

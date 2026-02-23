@@ -1367,8 +1367,12 @@ def manage_trade_updates(target_symbol=None):
                 # 2. Update Virtual Stop Thresholds (Hybrid Trailing)
                 updated = False
                 
-                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%
-                if pl_pct >= 0.30 and virtual_stop < 0.20:
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%, +40% -> +30%
+                if pl_pct >= 0.40 and virtual_stop < 0.30:
+                    virtual_stop = 0.30
+                    updated = True
+                    print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +30%.")
+                elif pl_pct >= 0.30 and virtual_stop < 0.20:
                     virtual_stop = 0.20
                     updated = True
                     print(f"💰 OPTION TRAILING (HYBRID): {symbol} up {pl_pct*100:.1f}%. Virtual SL set to +20%.")
