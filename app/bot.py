@@ -41,6 +41,9 @@ option_data_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+# Throttle repetitive same-bias skip logs.
+_LAST_SAME_BIAS_SKIP_LOG = {}
+
 def get_bars(symbol, timeframe, limit):
     # Calculate a lookback to ensure we have enough data (e.g. 14 days)
     # This prevents the API from defaulting to "today only" which breaks indicators like EMA50
@@ -696,6 +699,35 @@ def cancel_all_orders_for_symbol(symbol):
     except Exception as e:
         print(f"⚠️ Error cancelling orders for {symbol}: {e}")
 
+def _should_log_same_bias_skip(symbol, signal, interval_minutes=15):
+    """Rate-limit repeated 'same bias, skipping' logs for cleaner live output."""
+    key = f"{symbol}:{signal}"
+    now = datetime.now(timezone.utc)
+    last = _LAST_SAME_BIAS_SKIP_LOG.get(key)
+    if last is None or (now - last).total_seconds() >= (interval_minutes * 60):
+        _LAST_SAME_BIAS_SKIP_LOG[key] = now
+        return True
+    return False
+
+def _log_close_submission(symbol, close_result, context):
+    """Log close-order telemetry in a normalized way."""
+    try:
+        if isinstance(close_result, dict):
+            oid = close_result.get("id") or close_result.get("order_id") or "?"
+            status = close_result.get("status", "?")
+            print(f"✅ {context}: close submitted for {symbol} | id={oid} status={status}")
+            return
+
+        oid = getattr(close_result, "id", "?")
+        status = getattr(close_result, "status", "?")
+        filled_qty = getattr(close_result, "filled_qty", None)
+        msg = f"✅ {context}: close submitted for {symbol} | id={oid} status={status}"
+        if filled_qty is not None:
+            msg += f" filled_qty={filled_qty}"
+        print(msg)
+    except Exception as e:
+        print(f"✅ {context}: close submitted for {symbol} (details unavailable: {e})")
+
 def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None, max_option_contracts_override=None):
     # Determine bias for notifications
     bias = "bullish" if signal == "buy" else "bearish"
@@ -703,13 +735,13 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     # --- HARD FILTER CHECK ---
     if confidence <= 0:
         print(f"🛑 REJECTED: Confidence is 0 (Blocked by Strategy Filters) for {symbol}")
-        return
+        return False
 
     # --- GLOBAL SAFETY CHECKS ---
     safety = load_global_safety_state()
     if safety.get("halted", False):
         print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
-        return
+        return False
         
     if safety.get("last_loss_time"):
         last_loss = datetime.fromisoformat(safety["last_loss_time"])
@@ -717,7 +749,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
         time_diff = (datetime.now(timezone.utc) - last_loss).total_seconds() / 60
         if time_diff < wait_mins:
             print(f"🕒 COOL-DOWN: Last loss was {time_diff:.1f} mins ago. Waiting {wait_mins} total. Skipping.")
-            return
+            return False
 
     # --- TIME FILTER (10:00 AM - 3:30 PM ET) ---
     now_et = datetime.now(ZoneInfo("America/New_York"))
@@ -727,7 +759,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     
     if current_time < start_time or current_time > end_time:
         print(f"🕒 TIME FILTER: Current time {current_time} is outside the 09:40-15:55 window. Skipping.")
-        return
+        return False
 
     # --- DAILY TRADE CAP ---
     state = load_trade_state()
@@ -750,14 +782,14 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     
     if use_daily_cap and cap_limit >= 0 and daily_count >= cap_limit:
         print(f"🛑 DAILY CAP: Already placed {daily_count} trades for {symbol} today (limit: {cap_limit}). Skipping.")
-        return
+        return False
 
     # Get latest price and ample history for Swing Point detection
     # We need enough history to find a swing point (e.g. 50-100 bars)
     price_df = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 100)
     if price_df.empty:
         print("Could not fetch price for placement.")
-        return
+        return False
     
     price = price_df['close'].iloc[-1]
     last_close = price # Current price estimate
@@ -772,7 +804,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
         all_positions = trade_client.get_all_positions()
     except Exception as e:
         print(f"❌ Error fetching positions: {e}")
-        return
+        return False
 
     qty_held = 0
     side_held = None
@@ -810,7 +842,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             print(f"🔄 CROSS-ASSET CLEANUP: Closing {pos.symbol} bias conflict with {signal.upper()} signal.")
             try:
                 cancel_all_orders_for_symbol(pos.symbol)
-                trade_client.close_position(pos.symbol)
+                close_result = trade_client.close_position(pos.symbol)
+                _log_close_submission(pos.symbol, close_result, "CROSS-ASSET CLEANUP")
                 
                 # Notify
                 send_discord_live_trading_notification(
@@ -848,18 +881,19 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     if getattr(config, 'ENABLE_OPTIONS', False):
         if qty_held != 0:
              print(f"Warning: Holding underlying shares ({qty_held}) while in Options Mode. Skipping new option entries to avoid mix-up.")
-             return
+             return False
     else:
         if any_options_held:
              print(f"Warning: Holding option contracts while in Stock Mode. Skipping new stock entries to avoid mix-up.")
-             return
+             return False
 
     # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
 
         if same_bias_held:
-            print(f"Existing {signal.upper()} option bias detected for {symbol}. Skipping redundant entry.")
-            return
+            if _should_log_same_bias_skip(symbol, signal):
+                print(f"Existing {signal.upper()} option bias detected for {symbol}. Skipping redundant entry.")
+            return False
 
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         contract = get_best_option_contract(symbol, signal)
@@ -870,7 +904,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             contract_pos = get_current_position(trade_symbol)
             if contract_pos and float(contract_pos.qty) > 0:
                  print(f"Already hold {trade_symbol}. Holding.")
-                 return
+                 return False
 
             # Fetch Current Option Price to calculate Brackets
             from alpaca.data.requests import OptionLatestQuoteRequest
@@ -883,7 +917,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 entry_est = quote[trade_symbol].ask_price
                 if entry_est <= 0:
                     print(f"Invalid option ask price {entry_est}. Skipping.")
-                    return
+                    return False
                     
                 # Calculate Levels (-20% SL, +50% TP)
                 # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
@@ -930,7 +964,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 
                 if available_budget < cost_per_contract:
                     print(f"⚠️ WARNING: Insufficient Budget for {symbol} option. Global Remain: ${global_option_remaining:.2f}, Ticker Remain: ${ticker_remaining:.2f}. Need ${cost_per_contract:.2f}. Skipping.")
-                    return
+                    return False
                 
                 # 3. Risk-Based Position Sizing (mode allocation aware)
                 current_risk_target = equity * option_allocation_pct * RISK_PER_TRADE
@@ -947,7 +981,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                     
                 if qty < 1:
                     print("⚠️ WARNING: Calculated contracts < 1. Skipping.")
-                    return
+                    return False
 
                 print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
                 
@@ -983,7 +1017,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
                 save_trade_state(state, symbol=symbol)
-                return
+                return True
 
             except Exception as e:
                 print(f"❌ Option Order failed: {e}")
@@ -1021,7 +1055,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
             )
             if qty <= 0:
                 print("Calculated Quantity is 0, skipping trade.")
-                return
+                return False
 
             print(f"Placing BUY Bracket: Entry ~{price} | SL {sl_price:.2f} | TP {tp_price:.2f} | Qty {qty}")
             
@@ -1063,8 +1097,10 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 ticker_state["daily_trade_count"] = daily_count + 1
                 state[symbol] = ticker_state
                 save_trade_state(state, symbol=symbol)
+                return True
             except Exception as e:
                 print(f"❌ Order failed: {e}")
+                return False
         
         elif side_held == PositionSide.SHORT: 
              print(f"Closing Short Position ({qty_held} shares) due to BUY signal.")
@@ -1073,8 +1109,9 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 cancel_all_orders_for_symbol(symbol)
                 
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
-                trade_client.submit_order(order)
+                close_order = trade_client.submit_order(order)
                 print("✅ SHORT CLOSE SUBMITTED")
+                _log_close_submission(symbol, close_order, "TREND FLIP")
                 
                 # Notify
                 send_discord_live_trading_notification(
@@ -1091,13 +1128,15 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 )
              except Exception as e:
                 print(f"❌ Close Short failed: {e}")
+                return False
         else:
             print(f"Already Long {qty_held} shares. Ignoring BUY signal.")
+            return False
 
     elif signal == "sell":
         if qty_held == 0:
             print("SELL Signal detected but no position held. Skipping Short Entry (Long-Only Mode).")
-            return
+            return False
             
         elif side_held == PositionSide.LONG: # We are Long
             print(f"Closing Long Position ({qty_held} shares) due to SELL signal.")
@@ -1106,8 +1145,9 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 cancel_all_orders_for_symbol(symbol)
                 
                 order = MarketOrderRequest(symbol=symbol, qty=abs(qty_held), side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
-                trade_client.submit_order(order)
+                close_order = trade_client.submit_order(order)
                 print("✅ LONG CLOSE SUBMITTED")
+                _log_close_submission(symbol, close_order, "TREND FLIP")
                 
                 # Notify
                 send_discord_live_trading_notification(
@@ -1124,9 +1164,11 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 )
             except Exception as e:
                  print(f"❌ Close Long failed: {e}")
+                 return False
                  
         else:
             print(f"Already Short {qty_held} shares. Ignoring SELL signal.")
+            return False
 
     # 4. Final Notification
     if signal in ["buy", "sell"]:
@@ -1138,6 +1180,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
         bias = "BULLISH" if signal == "buy" else "BEARISH"
         # Do not send discord notification for now
         # send_discord_notification(signal, price, time_str, symbol, bias, confidence)
+
+    return False
 
 def load_initial_ticker_state(symbol):
     """Helper to load state for a specific symbol at startup or loop start."""
@@ -1323,7 +1367,8 @@ def manage_trade_updates(target_symbol=None):
                     print(f"🛑 OPTION {reason} HIT: {symbol} at {pl_pct*100:.1f}% (Stop: {virtual_stop*100:.1f}%). Closing.")
                     if pl_pct < 0:
                         mark_loss()
-                    trade_client.close_position(symbol)
+                    close_result = trade_client.close_position(symbol)
+                    _log_close_submission(symbol, close_result, f"OPTION {reason}")
                     
                     # Notify
                     send_discord_live_trading_notification(
@@ -1345,7 +1390,8 @@ def manage_trade_updates(target_symbol=None):
                     continue
                 elif pl_pct >= OPTION_TP:
                     print(f"🎯 OPTION TAKE PROFIT HIT: {symbol} at {pl_pct*100:.1f}%. Closing.")
-                    trade_client.close_position(symbol)
+                    close_result = trade_client.close_position(symbol)
+                    _log_close_submission(symbol, close_result, "OPTION TAKE PROFIT")
                     
                     # Notify
                     send_discord_live_trading_notification(
@@ -2009,7 +2055,7 @@ if __name__ == "__main__":
                     print(f"🚀 Signal detected: {sig.upper()}! Confidence: {conf}%")
                     # Pass daily_cap: -1 = unlimited, 0 = no trades, positive = cap
                     use_cap = (daily_cap != -1)
-                    place_trade(
+                    entry_submitted = place_trade(
                         sig, 
                         target_symbol, 
                         confidence=conf,
@@ -2018,10 +2064,14 @@ if __name__ == "__main__":
                         option_allocation_override=option_allocation,
                         max_option_contracts_override=max_option_contracts
                     )
-                    session.record_trade()
-                    # After a trade, sleep for 5 minutes to avoid rapid double-entry
-                    print("Trade placed. Cooling down for 5 minutes...")
-                    interruptible_sleep(300, session)
+                    if entry_submitted:
+                        session.record_trade()
+                        # After a successful entry, sleep to avoid rapid double-entry.
+                        print("Trade placed. Cooling down for 5 minutes...")
+                        interruptible_sleep(300, session)
+                    else:
+                        # No entry was submitted for this signal (skipped/managed-only); re-check normally.
+                        interruptible_sleep(60, session)
                 else:
                     # No signal, wait 1 minute before checking again
                     interruptible_sleep(60, session)
