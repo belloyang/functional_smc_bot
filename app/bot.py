@@ -283,6 +283,13 @@ async def get_latest_price_fallback(contract_or_symbol):
     except Exception as e:
         sym = contract_or_symbol.symbol if isinstance(contract_or_symbol, Contract) else contract_or_symbol
         print(f"Error in price fallback for {sym}: {e}")
+
+
+def _round_to_tick(price: float, tick: float) -> float:
+    """Round a price to the nearest valid IBKR tick increment."""
+    if tick <= 0:
+        tick = 0.01
+    return round(round(price / tick) * tick, 8)
     return None
 
 # ================= SMC LOGIC (CAUSAL) =================
@@ -1163,6 +1170,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 ib.reqMktData(opt_contract)
                 # Wait for ticker (Delayed data can take 2-5s to arrive initially)
                 entry_est = None
+                ticker = None
                 for _ in range(10): # Max 5 seconds
                     await asyncio.sleep(0.5)
                     ticker = ib.ticker(opt_contract)
@@ -1182,10 +1190,43 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
-                    
-                entry_est = float(entry_est)
-                sl_price = float(round(entry_est * 0.80, 2))
-                tp_price = float(round(entry_est * 1.50, 2))
+
+                # IBKR may reject "too aggressive" option limits when stale/fallback prices drift.
+                # Use live NBBO when available and normalize to contract minTick.
+                bid = float(getattr(ticker, "bid", 0) or 0) if ticker else 0.0
+                ask = float(getattr(ticker, "ask", 0) or 0) if ticker else 0.0
+                last = float(getattr(ticker, "last", 0) or 0) if ticker else 0.0
+
+                # Discover price increment from contract details (fallback 0.01).
+                min_tick = 0.01
+                try:
+                    cds = await ib.reqContractDetailsAsync(opt_contract)
+                    if cds and cds[0].minTick and cds[0].minTick > 0:
+                        min_tick = float(cds[0].minTick)
+                except Exception:
+                    pass
+
+                if bid > 0 and ask > 0 and ask >= bid:
+                    spread = ask - bid
+                    # Place slightly above mid but never above ask to reduce overpay/rejections.
+                    raw_entry = min(ask, ((bid + ask) / 2.0) + 0.25 * spread)
+                elif ask > 0:
+                    raw_entry = ask
+                elif last > 0:
+                    raw_entry = last
+                else:
+                    raw_entry = float(entry_est)
+
+                entry_est = _round_to_tick(float(raw_entry), min_tick)
+                if ask > 0:
+                    # Hard guard against marketability-style rejection spikes.
+                    entry_est = min(entry_est, _round_to_tick(ask, min_tick))
+                if entry_est <= 0:
+                    print(f"Invalid normalized entry price for {opt_contract.localSymbol}. Skipping.")
+                    return
+
+                sl_price = _round_to_tick(entry_est * 0.80, min_tick)
+                tp_price = _round_to_tick(entry_est * 1.50, min_tick)
                 
                 print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} | TP: {tp_price}")
                 
