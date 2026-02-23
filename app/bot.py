@@ -1149,10 +1149,34 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
 
     # ================= OPTIONS MODE =================
     if getattr(config, 'ENABLE_OPTIONS', False):
+        desired_right = 'C' if signal == 'buy' else 'P'
 
         if same_bias_held:
             print(f"Existing {signal.upper()} option bias detected for {symbol}. Skipping redundant entry.")
             return
+
+        # Guard: positions() may still be zero before a just-submitted order fills.
+        # Check open/pending IBKR option orders to avoid duplicate entries.
+        open_trades = ib.openTrades()
+        for t in open_trades:
+            try:
+                c = t.contract
+                o = t.order
+                if not isinstance(c, Option):
+                    continue
+                if c.symbol != symbol:
+                    continue
+                if getattr(c, "right", "") != desired_right:
+                    continue
+                if getattr(o, "action", "") != "BUY":
+                    continue
+                status = str(getattr(t.orderStatus, "status", "") or "").lower()
+                if status in {"filled", "cancelled", "inactive"}:
+                    continue
+                print(f"Pending {desired_right} option entry already exists for {symbol} ({c.localSymbol}). Skipping duplicate.")
+                return
+            except Exception:
+                continue
 
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         opt_contract = await get_best_option_contract(symbol, signal)
@@ -1164,6 +1188,24 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 if p.contract.conId == opt_contract.conId and p.position != 0:
                      print(f"Already hold {opt_contract.localSymbol}. Holding.")
                      return
+            # Also block if this exact contract already has an open BUY entry order.
+            for t in ib.openTrades():
+                try:
+                    c = t.contract
+                    o = t.order
+                    status = str(getattr(t.orderStatus, "status", "") or "").lower()
+                    if not isinstance(c, Option):
+                        continue
+                    if c.conId != opt_contract.conId:
+                        continue
+                    if getattr(o, "action", "") != "BUY":
+                        continue
+                    if status in {"filled", "cancelled", "inactive"}:
+                        continue
+                    print(f"Pending entry already exists for {opt_contract.localSymbol}. Skipping duplicate.")
+                    return
+                except Exception:
+                    continue
 
             try:
                 # Fetch Current Option Price (Tick)
