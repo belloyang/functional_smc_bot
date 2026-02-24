@@ -168,7 +168,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 15)
     MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
     peak_equity = initial_balance
-    last_flip_loss_time = None  # Anti-Chaser: Track time of last losing flip
     
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
@@ -216,10 +215,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         res = get_causal_signal_from_precomputed(htf_precomputed, ltf_precomputed, current_time_utc, ltf_window=200)
         signal, confidence = res if isinstance(res, tuple) else (res, 0)
 
-        # --- SMALL ACCOUNT CONFIDENCE GUARD ---
+        # Confidence gate follows CLI/runtime min_conf directly to mirror live bot behavior.
         current_min_conf = min_conf_val
-        if balance < 25000 and current_min_conf < 50:
-             current_min_conf = 50 # Auto-enforce Medium confidence for small accounts
         
         # For option revaluation and diagnostics.
         htf_slice = htf_data[htf_data.index <= (current_time_utc - timedelta(minutes=15))]
@@ -430,14 +427,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             conf_ok = (confidence >= current_min_conf)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
             
-            # --- ANTI-CHASER CHECK (Signal Flip Protection) ---
-            if last_flip_loss_time:
-                time_since_flip = (current_time_utc - last_flip_loss_time).total_seconds() / 60
-                if time_since_flip < 30: # Wait 30 mins after a flip loss
-                    continue
-                else:
-                    last_flip_loss_time = None
-
             # --- COOL-DOWN CHECK ---
             if last_loss_exit_time:
                 continue
@@ -550,9 +539,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     trades.append({'time': current_time_et, 'type': 'flip_exit_put', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT PUT @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     
-                    if pnl < 0:
-                        last_flip_loss_time = current_time_utc # Trigger Anti-Chaser
-                    
                     position = 0
                     active_trade = None
 
@@ -566,14 +552,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             # Check confidence threshold and daily cap
             conf_ok = (confidence >= current_min_conf)
             trade_count_ok = (not use_daily_cap) or (daily_trade_count < daily_cap_value)
-
-            # --- ANTI-CHASER CHECK (Signal Flip Protection) ---
-            if last_flip_loss_time:
-                time_since_flip = (current_time_utc - last_flip_loss_time).total_seconds() / 60
-                if time_since_flip < 30:
-                    continue
-                else:
-                    last_flip_loss_time = None
 
             # --- COOL-DOWN CHECK ---
             if last_loss_exit_time:
@@ -648,9 +626,6 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     trades.append({'time': current_time_et, 'type': 'flip_exit_call', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT CALL @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     
-                    if pnl < 0:
-                        last_flip_loss_time = current_time_utc # Trigger Anti-Chaser
-                        
                     position = 0
                     active_trade = None
 
