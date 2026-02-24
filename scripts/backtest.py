@@ -169,11 +169,33 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
     peak_equity = initial_balance
     
+    # --- PDT RULE ---
+    # If equity < $25k, allow max 3 day-trades in a rolling 5-business-day window.
+    pdt_enabled = initial_balance < 25000
+    pdt_daytrade_limit = 3
+    pdt_day_trade_dates = []  # one entry per same-day round-trip close (date in ET)
+    pdt_blocked_entries = 0
+    last_pdt_block_log_date = None
+    
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
+
+    def _register_day_trade(entry_ts_utc, exit_ts_utc):
+        if not pdt_enabled or entry_ts_utc is None or exit_ts_utc is None:
+            return
+        entry_date = entry_ts_utc.astimezone(ET).date()
+        exit_date = exit_ts_utc.astimezone(ET).date()
+        if entry_date == exit_date:
+            pdt_day_trade_dates.append(exit_date)
+
+    def _rolling_day_trade_count(current_date_et):
+        if not pdt_enabled:
+            return 0
+        window_start = (pd.Timestamp(current_date_et) - pd.tseries.offsets.BDay(4)).date()
+        return sum(1 for d in pdt_day_trade_dates if window_start <= d <= current_date_et)
     
     
     for i in range(start_idx, len(ltf_data)):
@@ -247,6 +269,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     if pnl < 0:
                         last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -260,6 +283,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'take_profit_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -300,6 +324,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     if pnl < 0:
                         last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -313,6 +338,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -350,6 +376,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                      pnl = (exit_price - entry_price) * 100 * abs(position)
                      trades.append({'time': current_time_et, 'type': 'expiry_close', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                      print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                      position = 0
                      active_trade = None
                      last_exit_time = current_time_utc
@@ -402,6 +429,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += position * price
                          pnl = (price - entry_price) * position
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': price, 'qty': position, 'pnl': pnl})
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
                      elif trade_type == "options":
@@ -413,6 +441,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += exit_pr * 100 * abs(position)
                          pnl = (exit_pr - entry_price) * 100 * abs(position)
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': exit_pr, 'qty': abs(position), 'pnl': pnl})
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
                  daily_stop_hit = True
@@ -422,6 +451,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
              continue
 
         # --- ENTRY LOGIC ---
+        pdt_day_trades_used = _rolling_day_trade_count(current_date)
+        pdt_entry_blocked = pdt_enabled and pdt_day_trades_used >= pdt_daytrade_limit
+        if pdt_entry_blocked and position == 0 and last_pdt_block_log_date != current_date:
+            print(f"[{current_time_et}] 🛑 PDT BLOCK: {pdt_day_trades_used} day-trades in rolling 5 business days (<$25k).")
+            last_pdt_block_log_date = current_date
+        if pdt_entry_blocked and position == 0 and signal in ("buy", "sell") and in_window:
+            pdt_blocked_entries += 1
+
         if signal == "buy":
             # 1. HARD BLOCK CHECK (Confidence 0)
             if confidence <= 0:
@@ -438,7 +475,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 continue
             
             can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
-            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -557,7 +594,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_put', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT PUT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
 
@@ -577,7 +614,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 continue
             
             can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
-            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -642,6 +679,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'sell_stock', 'price': price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] SELL STOCK @ {price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                 elif trade_type == "options":
@@ -656,7 +694,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_call', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT CALL @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
 
@@ -717,6 +755,10 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     print(f"Losses:          {loss_count}")
     print(f"Break-evens:     {be_count}")
     print(f"Win Rate:        {win_rate:.1f}%")
+    if pdt_enabled:
+        print(f"PDT Rule:        ON (<$25k, max {pdt_daytrade_limit} day-trades / 5 business days)")
+        print(f"PDT Day-Trades:  {len(pdt_day_trade_dates)}")
+        print(f"PDT Blocks:      {pdt_blocked_entries} entry attempts")
     
     # --- VISUALIZATION ---
     if equity_curve:

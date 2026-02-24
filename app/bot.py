@@ -768,7 +768,6 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     safety = load_global_safety_state()
     if safety.get("halted", False):
         print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
-        return False
         
     if safety.get("last_loss_time"):
         last_loss = datetime.fromisoformat(safety["last_loss_time"])
