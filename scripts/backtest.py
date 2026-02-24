@@ -61,7 +61,86 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False):
+def black_scholes_delta(S, K, T, r, sigma, type='call'):
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        intrinsic = 1.0 if (type == 'call' and S > K) else -1.0 if (type == 'put' and S < K) else 0.0
+        return intrinsic
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    if type == 'call':
+        return norm_cdf(d1)
+    return norm_cdf(d1) - 1.0
+
+def black_scholes_theta(S, K, T, r, sigma, type='call'):
+    """
+    Returns theta per day (negative for long options).
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    first = -(S * norm_pdf(d1) * sigma) / (2.0 * math.sqrt(T))
+    if type == 'call':
+        second = -r * K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        second = r * K * math.exp(-r * T) * norm_cdf(-d2)
+    return (first + second) / 365.0
+
+def select_backtest_option_contract(S, sigma, signal, r=0.04):
+    """
+    Greek-aware synthetic contract picker for backtest parity with live intent:
+    prefer moderate delta, lower theta decay, and slightly longer DTE (overnight-friendly).
+    """
+    min_dte = int(getattr(config, "OPTION_MIN_DTE", 5))
+    max_dte = int(getattr(config, "OPTION_MAX_DTE", 21))
+    target_dte = float(getattr(config, "OPTION_TARGET_DTE", 12))
+    target_delta = float(getattr(config, "OPTION_TARGET_DELTA", 0.55))
+
+    # Strike ladder around spot (1-point spacing) to mimic listed strikes.
+    lo = int(round(S * 0.94))
+    hi = int(round(S * 1.06))
+    dtes = sorted({d for d in [min_dte, 7, 10, 14, max_dte] if min_dte <= d <= max_dte})
+    if not dtes:
+        dtes = [7]
+
+    right = 'call' if signal == "buy" else 'put'
+    best = None
+    best_score = float("inf")
+    for dte in dtes:
+        T = dte / 365.0
+        for K in range(lo, hi + 1):
+            premium = black_scholes_price(S, K, T, r, sigma, type=right)
+            if premium <= 0:
+                continue
+            delta = black_scholes_delta(S, K, T, r, sigma, type=right)
+            if right == 'put':
+                delta = abs(delta)
+            theta_day = abs(black_scholes_theta(S, K, T, r, sigma, type=right))
+
+            dte_penalty = abs(dte - target_dte) / max(1.0, target_dte)
+            delta_penalty = abs(delta - target_delta)
+            theta_penalty = theta_day / max(0.001, premium)  # time decay efficiency
+            moneyness_penalty = abs(K - S) / max(1.0, S)
+
+            score = (
+                1.25 * delta_penalty
+                + 1.10 * theta_penalty
+                + 0.75 * dte_penalty
+                + 0.60 * moneyness_penalty
+            )
+            if score < best_score:
+                best_score = score
+                best = (K, dte, premium, right)
+
+    if best is None:
+        # Fallback
+        dte = max(7, min_dte)
+        K = round(S)
+        T = dte / 365.0
+        premium = black_scholes_price(S, K, T, r, sigma, type=right)
+        return K, dte, premium, right
+    return best
+
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False, ignore_pdt=False):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -171,7 +250,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     
     # --- PDT RULE ---
     # If equity < $25k, allow max 3 day-trades in a rolling 5-business-day window.
-    pdt_enabled = initial_balance < 25000
+    pdt_enabled = (initial_balance < 25000) and (not ignore_pdt)
     pdt_daytrade_limit = 3
     pdt_day_trade_dates = []  # one entry per same-day round-trip close (date in ET)
     pdt_blocked_entries = 0
@@ -759,6 +838,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         print(f"PDT Rule:        ON (<$25k, max {pdt_daytrade_limit} day-trades / 5 business days)")
         print(f"PDT Day-Trades:  {len(pdt_day_trade_dates)}")
         print(f"PDT Blocks:      {pdt_blocked_entries} entry attempts")
+    elif initial_balance < 25000 and ignore_pdt:
+        print("PDT Rule:        OFF (explicitly ignored by --ignore-pdt)")
     
     # --- VISUALIZATION ---
     if equity_curve:
@@ -823,6 +904,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     parser.add_argument("--max-iv", type=float, default=0.40, help="Maximum Implied Volatility allowed to enter a trade. Defaults to 0.40 (40%).")
     parser.add_argument("--allow-no-iv", action="store_true", help="Allow trades when IV data is unavailable (falls back to 20%%).")
+    parser.add_argument("--ignore-pdt", action="store_true", help="Ignore PDT rule in backtest even if balance is below $25,000 (default: PDT enforced).")
     
     args = parser.parse_args()
     
@@ -858,7 +940,6 @@ if __name__ == "__main__":
     
     mode = "options" if args.options else "stock"
     print(f"Max IV: {args.max_iv*100:.1f}%")
-
     run_backtest(
         days_back=args.days,
         symbol=args.symbol,
@@ -871,4 +952,4 @@ if __name__ == "__main__":
         min_conf_val=min_conf_val,
         max_iv=args.max_iv,
         allow_no_iv=args.allow_no_iv or getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False),
-    )
+        ignore_pdt=args.ignore_pdt)
