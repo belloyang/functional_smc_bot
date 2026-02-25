@@ -1,7 +1,7 @@
 import sys
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 
@@ -23,7 +23,7 @@ from app.bot import (
 CONF_THRESHOLDS = {
     "all": 0,
     "low": 20,
-    "medium": 50,
+    "medium": 60,
     "high": 80,
 }
 
@@ -97,16 +97,23 @@ def _fetch_for_scan(symbol: str):
     return htf_raw, ltf_raw, "app.bot.get_bars"
 
 
-def scan_today(symbol: str, min_conf: str = "all"):
+def scan_today(symbol: str, min_conf: str = "all", days_ago: int = 0):
     threshold = CONF_THRESHOLDS.get(min_conf, 0)
     symbol = symbol.upper()
     et = ZoneInfo("US/Eastern")
     now_et = datetime.now(et)
+    if days_ago > 0:
+        now_et -= timedelta(days=days_ago)
+        
     market_open_et = now_et.replace(hour=9, minute=40, second=0, microsecond=0)
     market_open_utc = market_open_et.astimezone(timezone.utc)
     market_close_et = now_et.replace(hour=15, minute=55, second=0, microsecond=0)
     market_close_utc = market_close_et.astimezone(timezone.utc)
-    end_utc = min(datetime.now(timezone.utc), market_close_utc)
+    
+    if days_ago > 0:
+        end_utc = market_close_utc
+    else:
+        end_utc = min(datetime.now(timezone.utc), market_close_utc)
 
     htf_raw, ltf_raw, feed = _fetch_for_scan(symbol)
     if htf_raw is None:
@@ -167,9 +174,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Replay today's closed 1m bars and report historical detections (non-live-parity mode).",
     )
+    parser.add_argument(
+        "--days-ago",
+        type=int,
+        default=0,
+        help="Number of days ago to scan when using --scan-today (default: 0).",
+    )
     args = parser.parse_args()
 
     if args.scan_today:
-        scan_today(args.symbol, args.min_conf)
+        scan_today(args.symbol, args.min_conf, args.days_ago)
     else:
         run(args.symbol, args.min_conf, args.watch, args.interval)

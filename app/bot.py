@@ -325,7 +325,7 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     # Check the LAST closed candle for bias. 
     last_htf = htf.iloc[-1]
     
-    # ADX Filter: Require stronger trend for entry (Raised from 20 to 25)
+    # ADX Filter: If ADX is below 25, the market is considered choppy.
     adx_val = last_htf.get('adx', 0)
     is_choppy = False
     if not pd.isna(adx_val) and adx_val < 25:
@@ -1965,7 +1965,7 @@ if __name__ == "__main__":
     CONF_THRESHOLDS = {
         'all': 0,
         'low': 20,
-        'medium': 50,
+        'medium': 60,
         'high': 80
     }
     min_conf_threshold = CONF_THRESHOLDS.get(min_conf, 0)

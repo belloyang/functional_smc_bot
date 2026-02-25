@@ -776,7 +776,7 @@ if __name__ == "__main__":
     CONF_THRESHOLDS = {
         'all': 0,
         'low': 20,
-        'medium': 50,
+        'medium': 60,
         'high': 80
     }
     min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
