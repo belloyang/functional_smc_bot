@@ -61,7 +61,7 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0):
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -478,7 +478,20 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     strike = round(price)
                     days_to_expiry = 7
                     T = days_to_expiry / 365.0
-                    sigma = current_vol if current_vol > 0 else 0.2
+                    iv = None
+                    if current_vol is not None and not np.isnan(current_vol):
+                        iv = current_vol
+                    if iv is None:
+                        if not allow_no_iv:
+                            # Missing IV and strict mode: skip entry
+                            continue
+                        sigma = 0.20  # fallback when allowed
+                    else:
+                        iv_val = iv / 100.0 if iv > 2 else iv
+                        if iv_val > max_iv:
+                            continue  # Skip trade when IV exceeds cap
+                        sigma = iv_val
+                    
                     premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
                     contract_cost = premium * 100
 
@@ -563,7 +576,19 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 if trade_type == "options":
                     strike = round(price)
                     days_to_expiry = 7
-                    sigma = current_vol if current_vol > 0 else 0.2
+                    iv = None
+                    if current_vol is not None and not np.isnan(current_vol):
+                        iv = current_vol
+                    if iv is None:
+                        if not allow_no_iv:
+                            continue
+                        sigma = 0.20
+                    else:
+                        iv_val = iv / 100.0 if iv > 2 else iv
+                        if iv_val > max_iv:
+                            continue
+                        sigma = iv_val
+                        
                     premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
                     contract_cost = premium * 100
 
@@ -748,6 +773,8 @@ if __name__ == "__main__":
     parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
     parser.add_argument("--max-option-contracts", type=int, default=-1, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
+    parser.add_argument("--max-iv", type=float, default=0.40, help="Maximum Implied Volatility allowed to enter a trade. Defaults to 0.40 (40%).")
+    parser.add_argument("--allow-no-iv", action="store_true", help="Allow trades when IV data is unavailable (falls back to 20%%).")
     
     args = parser.parse_args()
     
@@ -782,4 +809,18 @@ if __name__ == "__main__":
     min_conf_val = CONF_THRESHOLDS.get(args.min_conf, 0)
     
     mode = "options" if args.options else "stock"
-    run_backtest(days_back=args.days, symbol=args.symbol, trade_type=mode, initial_balance=args.balance, use_daily_cap=use_daily_cap, daily_cap_value=daily_cap_value, option_allocation_pct=option_allocation, max_option_contracts=args.max_option_contracts, min_conf_val=min_conf_val)
+    print(f"Max IV: {args.max_iv*100:.1f}%")
+
+    run_backtest(
+        days_back=args.days,
+        symbol=args.symbol,
+        trade_type=mode,
+        initial_balance=args.balance,
+        use_daily_cap=use_daily_cap,
+        daily_cap_value=daily_cap_value,
+        option_allocation_pct=option_allocation,
+        max_option_contracts=args.max_option_contracts,
+        min_conf_val=min_conf_val,
+        max_iv=args.max_iv,
+        allow_no_iv=args.allow_no_iv or getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False),
+    )

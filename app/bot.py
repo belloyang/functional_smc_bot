@@ -9,8 +9,13 @@ import sys
 import argparse
 import time
 import requests
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, OptionHistoricalDataClient
+from alpaca.data.requests import (
+    StockBarsRequest,
+    OptionSnapshotRequest,
+    OptionLatestQuoteRequest,
+    OptionChainRequest,
+)
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce, PositionSide, OrderStatus, QueryOrderStatus
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest, StopLossRequest, TakeProfitRequest, ReplaceOrderRequest
@@ -906,10 +911,36 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                  print(f"Already hold {trade_symbol}. Holding.")
                  return False
 
-            # Fetch Current Option Price to calculate Brackets
-            from alpaca.data.requests import OptionLatestQuoteRequest
+            # Fetch Current Option Price & Snapshot to calculate Brackets and check IV
+            from alpaca.data.requests import OptionLatestQuoteRequest, OptionSnapshotRequest
             try:
-                # We need the quote to determine Entry Price approximation
+                # 1. Check IV from Snapshot first
+                try:
+                    snap_req = OptionSnapshotRequest(symbol_or_symbols=trade_symbol)
+                    snap = option_data_client.get_option_snapshot(snap_req)
+                    iv = snap[trade_symbol].implied_volatility if snap and trade_symbol in snap else None
+                    max_iv = getattr(config, 'MAX_ALLOWED_IV', 0.40)
+                    allow_no_iv = getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False)
+
+                    if iv is None:
+                        if allow_no_iv:
+                            print("⚠️ IV unavailable; proceeding because ALLOW_TRADE_WITHOUT_IV=True.")
+                        else:
+                            print("🛑 REJECTED: Option IV unavailable; cannot enforce MAX_ALLOWED_IV. Set ALLOW_TRADE_WITHOUT_IV=True to override.")
+                            return False
+                    else:
+                        # Defensive: some feeds may return IV in percent (e.g., 55 for 55%)
+                        iv_value = iv / 100.0 if iv > 2 else iv
+                        if iv_value > max_iv:
+                            print(f"🛑 REJECTED: Option IV too high ({iv_value:.2f} > {max_iv:.2f}). Market too volatile.")
+                            return False
+                except Exception as e:
+                    print(f"⚠️ Could not fetch option snapshot for IV check: {e}")
+                    if not getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False):
+                        print("🛑 REJECTED: Missing IV data and ALLOW_TRADE_WITHOUT_IV is False.")
+                        return False
+
+                # 2. We need the quote to determine Entry Price approximation
                 quote_req = OptionLatestQuoteRequest(symbol_or_symbols=trade_symbol)
                 quote = option_data_client.get_option_latest_quote(quote_req)
                 
