@@ -74,3 +74,4 @@ MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from p
 COOL_DOWN_MINUTES = 15        # Wait period after any losing trade
 MAX_ALLOWED_IV = 0.40  # 40%
 ALLOW_TRADE_WITHOUT_IV = True  # If True, bot will proceed when IV snapshot is missing
+STALE_PENDING_ENTRY_MINUTES = 5  # Cancel unfilled entry orders after N minutes to avoid blocking

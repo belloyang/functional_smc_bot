@@ -1003,6 +1003,62 @@ async def cancel_all_orders_for_symbol(symbol):
             ibkr_mgr.ib.cancelOrder(t.order)
             print(f"Cancelled order for {symbol}")
 
+def _cancel_ibkr_orders_by_conid(ib, con_id):
+    """Cancel all IBKR open orders matching a given conId (options)."""
+    try:
+        for o in ib.openOrders():
+            c = o.contract
+            if hasattr(c, "conId") and c.conId == con_id:
+                ib.cancelOrder(o)
+                print(f"Cancelled stale IBKR order {getattr(o, 'orderId', '?')} for conId {con_id}")
+    except Exception as e:
+        print(f"⚠️ Error cancelling IBKR orders for conId {con_id}: {e}")
+
+def _cleanup_stale_pending_entry(ib, symbol, right, state):
+    """
+    If a pending entry was left open (unfilled) too long, cancel it and clear state.
+    Prevents a stale limit from blocking fresh signals all day.
+    """
+    ticker_state = state.get(symbol, {})
+    pending = ticker_state.get("pending_entry")
+    if not pending:
+        return state
+    try:
+        submitted_at = pending.get("submitted_at")
+        con_id = pending.get("con_id")
+        if not submitted_at:
+            ticker_state.pop("pending_entry", None)
+            state[symbol] = ticker_state
+            save_trade_state(state, symbol)
+            return state
+        age_min = (datetime.now(timezone.utc) - datetime.fromisoformat(submitted_at)).total_seconds() / 60
+        max_age = getattr(config, "STALE_PENDING_ENTRY_MINUTES", 5)
+        still_open = False
+        for t in ib.openTrades():
+            c = t.contract
+            o = t.order
+            status = str(getattr(t.orderStatus, "status", "") or "").lower()
+            if not isinstance(c, Option):
+                continue
+            if con_id and c.conId != con_id:
+                continue
+            if c.symbol != symbol:
+                continue
+            if right and getattr(c, "right", "") != right:
+                continue
+            if status in {"filled", "cancelled", "inactive"}:
+                continue
+            still_open = True
+            if age_min >= max_age:
+                _cancel_ibkr_orders_by_conid(ib, c.conId)
+        if (not still_open) or age_min >= max_age:
+            ticker_state.pop("pending_entry", None)
+            state[symbol] = ticker_state
+            save_trade_state(state, symbol)
+    except Exception as e:
+        print(f"⚠️ Error cleaning stale pending entry: {e}")
+    return state
+
 async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_value=None, option_allocation_override=None, max_option_contracts_override=None):
     ib = ibkr_mgr.ib
     # Determine bias for notifications
@@ -1187,6 +1243,9 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
             except Exception:
                 continue
 
+        # Cleanup stale pending entries that block new signals
+        state = _cleanup_stale_pending_entry(ib, symbol, desired_right, state)
+
         print(f"Options Trading Enabled. Searching for contract for {signal.upper()}...")
         opt_contract = await get_best_option_contract(symbol, signal)
         
@@ -1344,6 +1403,11 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 print(f"✅ OPTION BRACKET SUBMITTED: {opt_contract.localSymbol}")
                 # Update state
                 ticker_state["daily_trade_count"] = daily_count + 1
+                ticker_state["pending_entry"] = {
+                    "con_id": opt_contract.conId,
+                    "right": desired_right,
+                    "submitted_at": datetime.now(timezone.utc).isoformat(),
+                }
                 state[symbol] = ticker_state
                 save_trade_state(state, symbol)
                 return
