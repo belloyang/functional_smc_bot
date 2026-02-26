@@ -367,7 +367,16 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         
         if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
-    
+
+    # --- RSI OVERBOUGHT / OVERSOLD FILTER ---
+    # Avoid entering longs into overbought HTF conditions and shorts into oversold ones.
+    rsi = last_htf.get('rsi14', None)
+    if rsi is not None and not pd.isna(rsi):
+        if bias == "bullish" and rsi > 75:
+            return None, 0  # Overbought — risk of mean reversion against the trade
+        elif bias == "bearish" and rsi < 25:
+            return None, 0  # Oversold — risk of bounce against the trade
+
     # 2. LTF Analysis
     ltf = ltf.copy()
     # Add indicators if not present
@@ -399,8 +408,17 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     signal = None
     confidence = 0
     fvg_touch = False
-    
-    if is_opposite_impulse or vol_ratio > 2.0:
+
+    # Block if high volume is moving AGAINST our bias (reversal threat).
+    # High volume WITH our bias is fine — it signals strong directional interest on the pullback.
+    vol_against_bias = False
+    if vol_ratio > 2.0:
+        if bias == "bullish" and last_closed['close'] < last_closed['open']:
+            vol_against_bias = True  # Big red candle on high vol in a bull trend
+        elif bias == "bearish" and last_closed['close'] > last_closed['open']:
+            vol_against_bias = True  # Big green candle on high vol in a bear trend
+
+    if is_opposite_impulse or vol_against_bias:
         return None, 0
 
     # We look back over the last N candles to find a recent valid FVG/OB structure
@@ -457,9 +475,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
         # --- CONFIDENCE FLOOR ---
-        # Discard very "Low Confidence" signals below 40% to filter clear noise.
+        # Discard low-confidence signals. A valid signal (FVG+OB with ADX>=25) scores at least 60,
+        # so 50 only filters edge cases where indicator data is unreliable (e.g. ADX=0).
         # NOTE: 60% was too aggressive and blocked 70% of valid trend entries in summer 2025.
-        if confidence < 40:
+        if confidence < 50:
             return None, 0
 
     return signal, confidence
@@ -498,6 +517,9 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
 
     if 'atr' not in htf.columns:
         htf['atr'] = htf.ta.atr(length=14)
+
+    if 'rsi14' not in htf.columns:
+        htf['rsi14'] = ta.rsi(htf['close'], length=14)
 
     if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)
@@ -950,17 +972,13 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                     print(f"Invalid option ask price {entry_est}. Skipping.")
                     return False
                     
-                # Calculate Levels (-20% SL, +50% TP)
-                # Recommendation: Tighter stops (-20%) often preserve capital better in automated systems.
-                sl_price = entry_est * 0.80
-                tp_price = entry_est * 1.50
-                
-                # Round to 2 decimals
-                sl_price = round(sl_price, 2)
-                tp_price = round(tp_price, 2)
-                
-                print(f"Options Bracket: Est.Entry: {entry_est} | SL: {sl_price} (-20%) | TP: {tp_price} (+50%)")
-                
+                # SL/TP levels used for Discord notification and virtual stop tracking only.
+                # Alpaca options orders don't support bracket params — enforcement is via manage_trade_updates().
+                sl_price = round(entry_est * 0.80, 2)
+                tp_price = round(entry_est * 1.50, 2)
+
+                print(f"Options Levels: Est.Entry: {entry_est} | Virtual SL: {sl_price} (-20%) | Virtual TP: {tp_price} (+50%)")
+
                 # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
                 account = trade_client.get_account()
                 equity = float(account.equity)
@@ -1015,10 +1033,9 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                     return False
 
                 print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
-                
-                sl_req = StopLossRequest(stop_price=sl_price)
-                tp_req = TakeProfitRequest(limit_price=tp_price)
-                
+
+                # Note: Alpaca options orders do not support bracket parameters.
+                # SL/TP is enforced virtually via manage_trade_updates() polling loop.
                 order = MarketOrderRequest(
                     symbol=trade_symbol,
                     qty=qty,

@@ -384,9 +384,9 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             global_drawdown_hit = True
             break # Exit loop immediately
 
-        # Portfolio Loss Circuit Breaker (4% Daily Max)
+        # Portfolio Loss Circuit Breaker (3% Daily Max) — matches live bot threshold
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
-        if daily_pnl_pct <= -0.04:
+        if daily_pnl_pct <= -0.03:
              if not daily_stop_hit:
                  print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-4%). STOPPING FOR DAY.")
                  daily_stop_hit = True
@@ -476,7 +476,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
                 elif trade_type == "options":
                     strike = round(price)
-                    days_to_expiry = 7
+                    days_to_expiry = 10  # 10 DTE reduces theta decay vs 7 DTE; aligns better with live bot's 3-14 day search
                     T = days_to_expiry / 365.0
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
