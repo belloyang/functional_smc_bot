@@ -585,7 +585,16 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         
         if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
-    
+
+    # --- RSI OVERBOUGHT / OVERSOLD FILTER ---
+    # Avoid entering longs into overbought HTF conditions and shorts into oversold ones.
+    rsi = last_htf.get('rsi14', None)
+    if rsi is not None and not pd.isna(rsi):
+        if bias == "bullish" and rsi > 75:
+            return None, 0  # Overbought — risk of mean reversion against the trade
+        elif bias == "bearish" and rsi < 25:
+            return None, 0  # Oversold — risk of bounce against the trade
+
     # 2. LTF Analysis
     ltf = ltf.copy()
     # Add indicators if not present
@@ -617,8 +626,17 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     signal = None
     confidence = 0
     fvg_touch = False
-    
-    if is_opposite_impulse or vol_ratio > 2.0:
+
+    # Block if high volume is moving AGAINST our bias (reversal threat).
+    # High volume WITH our bias is fine — it signals strong directional interest on the pullback.
+    vol_against_bias = False
+    if vol_ratio > 2.0:
+        if bias == "bullish" and last_closed['close'] < last_closed['open']:
+            vol_against_bias = True  # Big red candle on high vol in a bull trend
+        elif bias == "bearish" and last_closed['close'] > last_closed['open']:
+            vol_against_bias = True  # Big green candle on high vol in a bear trend
+
+    if is_opposite_impulse or vol_against_bias:
         return None, 0
 
     # We look back over the last N candles to find a recent valid FVG/OB structure
@@ -675,9 +693,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     if signal:
         confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
         # --- CONFIDENCE FLOOR ---
-        # Discard very "Low Confidence" signals below 40% to filter clear noise.
+        # Discard low-confidence signals. A valid signal (FVG+OB with ADX>=25) scores at least 60,
+        # so 50 only filters edge cases where indicator data is unreliable (e.g. ADX=0).
         # NOTE: 60% was too aggressive and blocked 70% of valid trend entries in summer 2025.
-        if confidence < 40:
+        if confidence < 50:
             return None, 0
 
     return signal, confidence
@@ -716,6 +735,9 @@ def precompute_strategy_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame):
 
     if 'atr' not in htf.columns:
         htf['atr'] = htf.ta.atr(length=14)
+
+    if 'rsi14' not in htf.columns:
+        htf['rsi14'] = ta.rsi(htf['close'], length=14)
 
     if 'bull_fvg' not in ltf.columns or 'bear_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)
