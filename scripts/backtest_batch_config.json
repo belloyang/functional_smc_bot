@@ -1,23 +1,25 @@
 {
   "output_dir": "backtest-runs/ibkr/",
-  "symbols": ["SPY", "QQQ"],
-  "days": [30, 90, 365],
-  "balances": [2500, 10000],
-  "modes": ["options", "stock"],
+  "symbols": [
+    "QQQ"
+  ],
+  "days": [
+    30,
+    90,
+    180,
+    365
+  ],
+  "balances": [
+    2500,
+    5000
+  ],
+  "modes": [
+    "options",
+    "stock"
+  ],
   "cap": 5,
-  "option_allocation": 0.15,
+  "option_allocation": 1.0,
   "max_option_contracts": -1,
   "min_conf": "all",
-  "jobs": [
-    {
-      "symbol": "QQQ",
-      "days": 365,
-      "balance": 2500,
-      "mode": "options",
-      "cap": 5,
-      "option_allocation": 1.0,
-      "max_option_contracts": -1,
-      "min_conf": "all"
-    }
-  ]
+  "ignore_pdt": true
 }

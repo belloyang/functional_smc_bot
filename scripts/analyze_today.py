@@ -112,7 +112,8 @@ def _fetch_alpaca_scan(symbol: str):
 async def _fetch_for_scan(symbol: str):
     try:
         htf_raw = await get_bars(symbol, TimeFrame(15, TimeFrameUnit.Minute), 10000)
-        ltf_raw = await get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 10000)
+        # fetch more history for stable EMA calculation
+        ltf_raw = await get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 20000)
         if htf_raw is not None and ltf_raw is not None and not htf_raw.empty and not ltf_raw.empty:
             return htf_raw, ltf_raw, "app.bot.get_bars"
     except Exception:

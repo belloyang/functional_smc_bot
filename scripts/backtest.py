@@ -196,7 +196,11 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             else:
                 last_loss_exit_time = None
                 
-        # --- REFINED MARKET HOURS FILTER (9:40 AM - 3:55 PM ET) ---
+        # Regular Market Hours (9:30 AM - 4:00 PM ET) for managing existing positions
+        market_open = current_time_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = current_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        is_market_open = (market_open <= current_time_et <= market_close)
+
         trade_window_start = current_time_et.replace(hour=9, minute=40, second=0, microsecond=0)
         trade_window_end = current_time_et.replace(hour=15, minute=55, second=0, microsecond=0)
         
@@ -229,7 +233,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         # --- RISK CHECKS (Before Signal) ---
         current_option_price = 0
-        if position != 0 and active_trade:
+        if position != 0 and active_trade and is_market_open:
             if trade_type == "stock":
                 # 1. Stop Loss Hit
                 if price <= active_trade['stop_loss']:
@@ -337,7 +341,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 
                 # 4. Expiry Guard (Sync with bot.py: Close ON expiration day)
                 is_expiry_day = (current_time_utc.date() >= active_trade['expiry_date'].date())
-                if is_expiry_day:
+                if is_expiry_day and is_market_open:
                      exit_price = current_option_price
                      proceeds = exit_price * 100 * abs(position)
                      balance += proceeds
@@ -386,7 +390,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         # Portfolio Loss Circuit Breaker (3% Daily Max) — matches live bot threshold
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
-        if daily_pnl_pct <= -0.03:
+        if daily_pnl_pct <= -0.03 and is_market_open:
              if not daily_stop_hit:
                  print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-3%). STOPPING FOR DAY.")
                  daily_stop_hit = True

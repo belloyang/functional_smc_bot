@@ -413,7 +413,7 @@ def detect_structure_shift(df):
     # Not fully implemented in causal way for this snippet, relying on simpler OB/Impulse logic
     return df
 
-def calculate_confidence(ltf_row, last_htf, fvg_touch=False):
+def calculate_confidence(ltf_row, last_htf, fvg_touch=False, trend_boost=False):
     """Calculates a confidence score between 0-100%."""
     score = 0
     
@@ -447,6 +447,10 @@ def calculate_confidence(ltf_row, last_htf, fvg_touch=False):
             score += 15
         elif adx < 15:
             score -= 20 # Penalize very choppy markets
+
+    # 5. Trend Start Priority Boost (15%) - Early Trend capture
+    if trend_boost:
+        score += 15
             
     return int(min(100, max(0, score)))
 
@@ -557,47 +561,55 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     if is_choppy:
         bias = "choppy"
     else:
-        # Bias Hysteresis: Use ATR to scale the buffer (10% of ATR)
+        # Bias Hysteresis
         price = last_htf['close']
         ema = last_htf['ema50']
         atr = last_htf.get('atr', price * 0.001) 
         
         buffer = 0.1 * (atr / price)
-        buffer = max(0.0002, min(0.001, buffer)) # Sanity bounds (0.02% to 0.1%)
+        buffer = max(0.0002, min(0.001, buffer)) 
         
         if price > (ema + buffer):
             bias = "bullish"
         elif price < (ema - buffer):
             bias = "bearish"
         else:
-            bias = "choppy" # Inside the noise band
+            bias = "choppy" 
 
         # --- BALANCED EXTENSION FILTER ---
-        # Don't chase trends if price is already significantly extended, UNLESS the move is parabolic.
         dist_from_ema = abs(price - ema)
-        
-        # Parabolic Override: If ADX is extremely high (> 40), extension is a sign of strength, not exhaustion.
         is_parabolic = adx_val > 40
-        
-        # Buffer kept at 3.0x ATR for balanced momentum capture
-        # NOTE: 2.5x was too tight and blocked entries during strong summer 2025 QQQ trend
         extension_limit = 3.0 * atr
         
         if dist_from_ema > extension_limit and not is_parabolic:
             return None, 0
 
+    # --- TREND START PRIORITY ---
+    # Detect if bias recently changed (early stage capture)
+    bias_changed_recently = False
+    if len(htf) >= 4:
+        prev_prices = htf['close'].iloc[-4:-1]
+        prev_emas = htf['ema50'].iloc[-4:-1]
+        prev_biases = []
+        for p, e in zip(prev_prices, prev_emas):
+            if p > (e + buffer): prev_biases.append("bullish")
+            elif p < (e - buffer): prev_biases.append("bearish")
+            else: prev_biases.append("choppy")
+        
+        if bias in ("bullish", "bearish") and any(b != bias for b in prev_biases):
+            bias_changed_recently = True
+
     # --- RSI OVERBOUGHT / OVERSOLD FILTER ---
-    # Avoid entering longs into overbought HTF conditions and shorts into oversold ones.
+    # Relaxed thresholds to 80/20 for better trend persistence
     rsi = last_htf.get('rsi14', None)
     if rsi is not None and not pd.isna(rsi):
-        if bias == "bullish" and rsi > 75:
-            return None, 0  # Overbought — risk of mean reversion against the trade
-        elif bias == "bearish" and rsi < 25:
-            return None, 0  # Oversold — risk of bounce against the trade
+        if bias == "bullish" and rsi > 80:
+            return None, 0  
+        elif bias == "bearish" and rsi < 20:
+            return None, 0  
 
     # 2. LTF Analysis
     ltf = ltf.copy()
-    # Add indicators if not present
     if 'bull_fvg' not in ltf.columns:
         ltf = detect_fvg(ltf)
     if 'is_bull_ob_candle' not in ltf.columns:
@@ -605,12 +617,10 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     
     if len(ltf) < 5: return None
     
-    # Get last formed candle for signal check
     last_closed = ltf.iloc[-1]
+    prev_closed = ltf.iloc[-2]
     
-    # --- FALLING KNIFE / MOMENTUM PROTECTION ---
-    # Don't enter if the signal candle is a massive impulse AGAINST our bias.
-    # e.g. buying when a giant red candle just slammed into the FVG.
+    # --- FALLING KNIFE Protection ---
     is_opposite_impulse = False
     if last_closed.get('impulse', False):
         if bias == "bullish" and last_closed['close'] < last_closed['open']:
@@ -618,7 +628,6 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
         elif bias == "bearish" and last_closed['close'] > last_closed['open']:
             is_opposite_impulse = True
             
-    # Volume Confirmation: Pullbacks on extreme volume are risky (reversal threat)
     vol_ratio = 1.0
     if last_closed.get('avg_vol', 0) > 0:
         vol_ratio = last_closed['volume'] / last_closed['avg_vol']
@@ -627,75 +636,62 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     confidence = 0
     fvg_touch = False
 
-    # Block if high volume is moving AGAINST our bias (reversal threat).
-    # High volume WITH our bias is fine — it signals strong directional interest on the pullback.
     vol_against_bias = False
     if vol_ratio > 2.0:
         if bias == "bullish" and last_closed['close'] < last_closed['open']:
-            vol_against_bias = True  # Big red candle on high vol in a bull trend
+            vol_against_bias = True  
         elif bias == "bearish" and last_closed['close'] > last_closed['open']:
-            vol_against_bias = True  # Big green candle on high vol in a bear trend
+            vol_against_bias = True  
 
     if is_opposite_impulse or vol_against_bias:
         return None, 0
 
-    # We look back over the last N candles to find a recent valid FVG/OB structure
     lookback = 15
     recent_ltf = ltf.iloc[-lookback-1:-1]
     
-    # Threshold for "close enough" (Scaled with volatility)
-    atr = last_htf.get('atr', last_closed['close'] * 0.005)
-    buffer = 0.1 * (atr / last_closed['close'])
-    buffer = max(0.0002, min(0.001, buffer)) # Sanity bounds
+    atr_ltf = last_htf.get('atr', last_closed['close'] * 0.005)
+    ltf_buffer = 0.1 * (atr_ltf / last_closed['close'])
+    ltf_buffer = max(0.0002, min(0.001, ltf_buffer)) 
     
     if bias == "bullish":
-        # Search for a recent Bullish FVG associated with an Impulse/OB
         for i in range(len(recent_ltf) - 1, -1, -1):
             row = recent_ltf.iloc[i]
             if row.get('bull_fvg', False):
                 ob_nearby = any(recent_ltf.iloc[max(0, i-2):min(len(recent_ltf), i+1)]['is_bull_ob_candle'])
-                
                 if ob_nearby:
-                    fvg_top = row['bull_fvg_top']
-                    fvg_bot = row['bull_fvg_bottom']
+                    # Identify zone by top/bottom
+                    zone_top = row['bull_fvg_top'] * (1 + ltf_buffer)
+                    zone_bot = row['bull_fvg_bottom'] * (1 - ltf_buffer)
+
+                    # --- FIRST TOUCH / RETEST LOGIC ---
+                    was_touching = prev_closed['low'] <= zone_top and prev_closed['close'] > zone_bot
                     
-                    # Entry condition: Price pulls back to touch or get very close to FVG top
-                    # But must stay above FVG bottom (structure preservation)
-                    px_limit_top = fvg_top * (1 + buffer)
-                    px_limit_bot = fvg_bot * (1 - buffer)
-                    
-                    if last_closed['low'] <= px_limit_top and last_closed['close'] > px_limit_bot:
-                        signal = "buy"
-                        fvg_touch = True
-                        break
+                    if last_closed['low'] <= zone_top and last_closed['close'] > zone_bot:
+                        if not was_touching or bias_changed_recently:
+                            signal = "buy"
+                            fvg_touch = True
+                            break
              
     elif bias == "bearish":
         for i in range(len(recent_ltf) - 1, -1, -1):
             row = recent_ltf.iloc[i]
             if row.get('bear_fvg', False):
                 ob_nearby = any(recent_ltf.iloc[max(0, i-2):min(len(recent_ltf), i+1)]['is_bear_ob_candle'])
-                
                 if ob_nearby:
-                    fvg_top = row['bear_fvg_top']
-                    fvg_bot = row['bear_fvg_bottom']
-                    
-                    px_limit_top = fvg_top * (1 + buffer)
-                    px_limit_bot = fvg_bot * (1 - buffer)
-                    
-                    if last_closed['high'] >= px_limit_bot and last_closed['close'] < px_limit_top:
-                        signal = "sell"
-                        fvg_touch = True
-                        break
+                    zone_top = row['bear_fvg_top'] * (1 + ltf_buffer)
+                    zone_bot = row['bear_fvg_bottom'] * (1 - ltf_buffer)
 
-    elif bias == "choppy":
-         signal = None
+                    was_touching = prev_closed['high'] >= zone_bot and prev_closed['close'] < zone_top
+                    
+                    if last_closed['high'] >= zone_bot and last_closed['close'] < zone_top:
+                        if not was_touching or bias_changed_recently:
+                            signal = "sell"
+                            fvg_touch = True
+                            break
 
     if signal:
-        confidence = calculate_confidence(last_closed, htf.iloc[-1], fvg_touch=fvg_touch)
-        # --- CONFIDENCE FLOOR ---
-        # Discard low-confidence signals. A valid signal (FVG+OB with ADX>=25) scores at least 60,
-        # so 50 only filters edge cases where indicator data is unreliable (e.g. ADX=0).
-        # NOTE: 60% was too aggressive and blocked 70% of valid trend entries in summer 2025.
+        confidence = calculate_confidence(last_closed, last_htf, fvg_touch=fvg_touch, trend_boost=bias_changed_recently)
+        # Confidence Floor
         if confidence < 50:
             return None, 0
 
