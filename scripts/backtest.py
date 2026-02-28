@@ -906,7 +906,7 @@ if __name__ == "__main__":
     parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0). Stock allocation is 1 - option-allocation.")
     parser.add_argument("--max-option-contracts", type=int, default=-1, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
-    parser.add_argument("--max-iv", type=float, default=0.40, help="Maximum Implied Volatility allowed to enter a trade. Defaults to 0.40 (40%).")
+    parser.add_argument("--max-iv", type=float, default=0.40, help="Maximum Implied Volatility allowed to enter a trade. Defaults to 0.40 (40%%).")
     parser.add_argument("--allow-no-iv", action="store_true", help="Allow trades when IV data is unavailable (falls back to 20%%).")
     parser.add_argument("--ignore-pdt", action="store_true", help="Ignore PDT rule in backtest even if balance is below $25,000 (default: PDT enforced).")
     
