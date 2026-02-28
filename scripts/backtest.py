@@ -61,7 +61,86 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         
     return price
 
-def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False):
+def black_scholes_delta(S, K, T, r, sigma, type='call'):
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        intrinsic = 1.0 if (type == 'call' and S > K) else -1.0 if (type == 'put' and S < K) else 0.0
+        return intrinsic
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    if type == 'call':
+        return norm_cdf(d1)
+    return norm_cdf(d1) - 1.0
+
+def black_scholes_theta(S, K, T, r, sigma, type='call'):
+    """
+    Returns theta per day (negative for long options).
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    first = -(S * norm_pdf(d1) * sigma) / (2.0 * math.sqrt(T))
+    if type == 'call':
+        second = -r * K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        second = r * K * math.exp(-r * T) * norm_cdf(-d2)
+    return (first + second) / 365.0
+
+def select_backtest_option_contract(S, sigma, signal, r=0.04):
+    """
+    Greek-aware synthetic contract picker for backtest parity with live intent:
+    prefer moderate delta, lower theta decay, and slightly longer DTE (overnight-friendly).
+    """
+    min_dte = int(getattr(config, "OPTION_MIN_DTE", 5))
+    max_dte = int(getattr(config, "OPTION_MAX_DTE", 21))
+    target_dte = float(getattr(config, "OPTION_TARGET_DTE", 12))
+    target_delta = float(getattr(config, "OPTION_TARGET_DELTA", 0.55))
+
+    # Strike ladder around spot (1-point spacing) to mimic listed strikes.
+    lo = int(round(S * 0.94))
+    hi = int(round(S * 1.06))
+    dtes = sorted({d for d in [min_dte, 7, 10, 14, max_dte] if min_dte <= d <= max_dte})
+    if not dtes:
+        dtes = [7]
+
+    right = 'call' if signal == "buy" else 'put'
+    best = None
+    best_score = float("inf")
+    for dte in dtes:
+        T = dte / 365.0
+        for K in range(lo, hi + 1):
+            premium = black_scholes_price(S, K, T, r, sigma, type=right)
+            if premium <= 0:
+                continue
+            delta = black_scholes_delta(S, K, T, r, sigma, type=right)
+            if right == 'put':
+                delta = abs(delta)
+            theta_day = abs(black_scholes_theta(S, K, T, r, sigma, type=right))
+
+            dte_penalty = abs(dte - target_dte) / max(1.0, target_dte)
+            delta_penalty = abs(delta - target_delta)
+            theta_penalty = theta_day / max(0.001, premium)  # time decay efficiency
+            moneyness_penalty = abs(K - S) / max(1.0, S)
+
+            score = (
+                1.25 * delta_penalty
+                + 1.10 * theta_penalty
+                + 0.75 * dte_penalty
+                + 0.60 * moneyness_penalty
+            )
+            if score < best_score:
+                best_score = score
+                best = (K, dte, premium, right)
+
+    if best is None:
+        # Fallback
+        dte = max(7, min_dte)
+        K = round(S)
+        T = dte / 365.0
+        premium = black_scholes_price(S, K, T, r, sigma, type=right)
+        return K, dte, premium, right
+    return best
+
+def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False, ignore_pdt=False):
     if symbol is None:
         symbol = config.SYMBOL
         
@@ -169,11 +248,33 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
     peak_equity = initial_balance
     
+    # --- PDT RULE ---
+    # If equity < $25k, allow max 3 day-trades in a rolling 5-business-day window.
+    pdt_enabled = (initial_balance < 25000) and (not ignore_pdt)
+    pdt_daytrade_limit = 3
+    pdt_day_trade_dates = []  # one entry per same-day round-trip close (date in ET)
+    pdt_blocked_entries = 0
+    last_pdt_block_log_date = None
+    
     start_idx = 400 # Warmup for vol and indicators
     equity_curve.append({'time': ltf_data.index[start_idx-1], 'balance': balance})
     
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("US/Eastern")
+
+    def _register_day_trade(entry_ts_utc, exit_ts_utc):
+        if not pdt_enabled or entry_ts_utc is None or exit_ts_utc is None:
+            return
+        entry_date = entry_ts_utc.astimezone(ET).date()
+        exit_date = exit_ts_utc.astimezone(ET).date()
+        if entry_date == exit_date:
+            pdt_day_trade_dates.append(exit_date)
+
+    def _rolling_day_trade_count(current_date_et):
+        if not pdt_enabled:
+            return 0
+        window_start = (pd.Timestamp(current_date_et) - pd.tseries.offsets.BDay(4)).date()
+        return sum(1 for d in pdt_day_trade_dates if window_start <= d <= current_date_et)
     
     
     for i in range(start_idx, len(ltf_data)):
@@ -206,8 +307,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
+        # Regular Market Hours (9:30 AM - 4:00 PM ET) for managing existing positions
+        market_open = current_time_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = current_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        is_market_open = (market_open <= current_time_et <= market_close)
+
         # We don't 'continue' here because we still want to manage open positions
-        # outside the entry window (e.g. for stops/targets during the first 30 mins).
+        # outside the entry window (e.g. for stops/targets during the first 30 mins),
+        # but we MUST stay within regular market hours for options.
 
         # --- DAYS BACK ENFORCEMENT ---
         # We fetched extra data for warmup, but we only want to trade starting from days_back
@@ -245,6 +352,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     if pnl < 0:
                         last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -258,6 +366,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'take_profit_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -298,6 +407,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
                     if pnl < 0:
                         last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -311,6 +421,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                     last_exit_time = current_time_utc
@@ -348,6 +459,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                      pnl = (exit_price - entry_price) * 100 * abs(position)
                      trades.append({'time': current_time_et, 'type': 'expiry_close', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                      print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                      position = 0
                      active_trade = None
                      last_exit_time = current_time_utc
@@ -400,6 +512,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += position * price
                          pnl = (price - entry_price) * position
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': price, 'qty': position, 'pnl': pnl})
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
                      elif trade_type == "options":
@@ -411,6 +524,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += exit_pr * 100 * abs(position)
                          pnl = (exit_pr - entry_price) * 100 * abs(position)
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': exit_pr, 'qty': abs(position), 'pnl': pnl})
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
                  daily_stop_hit = True
@@ -420,6 +534,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
              continue
 
         # --- ENTRY LOGIC ---
+        pdt_day_trades_used = _rolling_day_trade_count(current_date)
+        pdt_entry_blocked = pdt_enabled and pdt_day_trades_used >= pdt_daytrade_limit
+        if pdt_entry_blocked and position == 0 and last_pdt_block_log_date != current_date:
+            print(f"[{current_time_et}] 🛑 PDT BLOCK: {pdt_day_trades_used} day-trades in rolling 5 business days (<$25k).")
+            last_pdt_block_log_date = current_date
+        if pdt_entry_blocked and position == 0 and signal in ("buy", "sell") and in_window:
+            pdt_blocked_entries += 1
+
         if signal == "buy":
             # 1. HARD BLOCK CHECK (Confidence 0)
             if confidence <= 0:
@@ -436,7 +558,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 continue
             
             can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
-            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Long (Stock or Call)
                 if trade_type == "stock":
                     # Determine SL/TP (Sync with bot.py)
@@ -555,7 +677,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_put', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT PUT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
 
@@ -575,7 +697,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 continue
             
             can_enter_by_time = (next_entry_allowed_time is None or current_time_utc >= next_entry_allowed_time)
-            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time:
+            if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Short (Options only)
                 if trade_type == "options":
                     strike = round(price)
@@ -640,6 +762,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (price - entry_price) * position
                     trades.append({'time': current_time_et, 'type': 'sell_stock', 'price': price, 'qty': position, 'pnl': pnl})
                     print(f"[{current_time_et}] SELL STOCK @ {price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
                 elif trade_type == "options":
@@ -654,7 +777,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': 'flip_exit_call', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] FLIP EXIT CALL @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
 
@@ -715,6 +838,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     print(f"Losses:          {loss_count}")
     print(f"Break-evens:     {be_count}")
     print(f"Win Rate:        {win_rate:.1f}%")
+    if pdt_enabled:
+        print(f"PDT Rule:        ON (<$25k, max {pdt_daytrade_limit} day-trades / 5 business days)")
+        print(f"PDT Day-Trades:  {len(pdt_day_trade_dates)}")
+        print(f"PDT Blocks:      {pdt_blocked_entries} entry attempts")
+    elif initial_balance < 25000 and ignore_pdt:
+        print("PDT Rule:        OFF (explicitly ignored by --ignore-pdt)")
     
     # --- VISUALIZATION ---
     if equity_curve:
@@ -779,6 +908,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-conf", type=str, choices=['all', 'low', 'medium', 'high'], default='all', help="Minimum confidence level to take a signal (default: all)")
     parser.add_argument("--max-iv", type=float, default=0.40, help="Maximum Implied Volatility allowed to enter a trade. Defaults to 0.40 (40%).")
     parser.add_argument("--allow-no-iv", action="store_true", help="Allow trades when IV data is unavailable (falls back to 20%%).")
+    parser.add_argument("--ignore-pdt", action="store_true", help="Ignore PDT rule in backtest even if balance is below $25,000 (default: PDT enforced).")
     
     args = parser.parse_args()
     
@@ -814,7 +944,6 @@ if __name__ == "__main__":
     
     mode = "options" if args.options else "stock"
     print(f"Max IV: {args.max_iv*100:.1f}%")
-
     run_backtest(
         days_back=args.days,
         symbol=args.symbol,
@@ -827,4 +956,4 @@ if __name__ == "__main__":
         min_conf_val=min_conf_val,
         max_iv=args.max_iv,
         allow_no_iv=args.allow_no_iv or getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False),
-    )
+        ignore_pdt=args.ignore_pdt or getattr(config, 'IGNORE_PDT', False))

@@ -1307,6 +1307,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                         if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                              entry_est = ticker.marketPrice()
                     
+<<<<<<< HEAD
                     if entry_est and entry_est > 0 and not np.isnan(entry_est):
                         break
                 
@@ -1364,6 +1365,18 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 for v in acc_values:
                     if v.tag == 'NetLiquidation': equity = float(v.value)
                 
+=======
+                # SL/TP levels used for Discord notification and virtual stop tracking only.
+                # Alpaca options orders don't support bracket params — enforcement is via manage_trade_updates().
+                sl_price = round(entry_est * 0.80, 2)
+                tp_price = round(entry_est * 1.50, 2)
+
+                print(f"Options Levels: Est.Entry: {entry_est} | Virtual SL: {sl_price} (-20%) | Virtual TP: {tp_price} (+50%)")
+
+                # --- GLOBAL OPTION EXPOSURE (Sum of all held premiums) ---
+                account = trade_client.get_account()
+                equity = float(account.equity)
+>>>>>>> feature/enforce-pdt-rule
                 budget_pct = option_allocation_pct
                 total_budget = equity * budget_pct
                 
@@ -1395,6 +1408,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     return
 
                 print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
+<<<<<<< HEAD
                 
                 # Place Bracket
                 action = 'BUY'
@@ -1402,6 +1416,19 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 for o in bracket:
                     o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(opt_contract, o)
+=======
+
+                # Note: Alpaca options orders do not support bracket parameters.
+                # SL/TP is enforced virtually via manage_trade_updates() polling loop.
+                order = MarketOrderRequest(
+                    symbol=trade_symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                
+                trade_client.submit_order(order)
+>>>>>>> feature/enforce-pdt-rule
                 
                 # Notify
                 send_discord_live_trading_notification(

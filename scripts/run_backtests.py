@@ -57,6 +57,7 @@ class BacktestJob:
     option_allocation: float | None = None
     max_option_contracts: int | None = None
     min_conf: str | None = None
+    ignore_pdt: bool | None = None
 
     def id_slug(self) -> str:
         return f"{self.symbol}_{self.mode}_{self.days}d_{self.balance:g}".replace("/", "_")
@@ -101,6 +102,7 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
                     option_allocation=(None if j.get("option_allocation", common.get("option_allocation")) is None else float(j.get("option_allocation", common.get("option_allocation")))),
                     max_option_contracts=(None if j.get("max_option_contracts", common.get("max_option_contracts")) is None else int(j.get("max_option_contracts", common.get("max_option_contracts")))),
                     min_conf=(None if j.get("min_conf", common.get("min_conf")) is None else str(j.get("min_conf", common.get("min_conf")))),
+                    ignore_pdt=(None if j.get("ignore_pdt", common.get("ignore_pdt")) is None else bool(j.get("ignore_pdt", common.get("ignore_pdt")))),
                 )
             )
         return jobs
@@ -119,6 +121,7 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
     option_allocation = args.option_allocation if args.option_allocation is not None else cfg.get("option_allocation")
     max_option_contracts = args.max_option_contracts if args.max_option_contracts is not None else cfg.get("max_option_contracts")
     min_conf = args.min_conf if args.min_conf is not None else cfg.get("min_conf")
+    ignore_pdt = args.ignore_pdt if hasattr(args, 'ignore_pdt') and args.ignore_pdt is not None else cfg.get("ignore_pdt")
 
     for symbol, day, bal, mode in itertools.product(symbols, days, balances, modes):
         jobs.append(
@@ -131,6 +134,7 @@ def build_jobs(args: argparse.Namespace, cfg: dict[str, Any]) -> list[BacktestJo
                 option_allocation=(None if option_allocation is None else float(option_allocation)),
                 max_option_contracts=(None if max_option_contracts is None else int(max_option_contracts)),
                 min_conf=(None if min_conf is None else str(min_conf)),
+                ignore_pdt=(None if ignore_pdt is None else bool(ignore_pdt)),
             )
         )
 
@@ -151,7 +155,9 @@ def build_command(python_bin: str, backtest_script: Path, job: BacktestJob) -> l
         cmd.extend(["--max-option-contracts", str(job.max_option_contracts)])
     if job.min_conf is not None:
         cmd.extend(["--min-conf", str(job.min_conf)])
-
+    if job.ignore_pdt:
+        cmd.append("--ignore-pdt")
+    
     return cmd
 
 
@@ -168,6 +174,7 @@ def main() -> int:
     parser.add_argument("--option-allocation", type=float, help="Fraction of equity allocated to options (0.0 to 1.0)")
     parser.add_argument("--max-option-contracts", type=int, help="Maximum option contracts per trade (-1 for no limit)")
     parser.add_argument("--min-conf", type=str, choices=["all", "low", "medium", "high"], help="Signal confidence filter")
+    parser.add_argument("--ignore-pdt", action="store_true", help="Bypass PDT rule")
     parser.add_argument("--output-dir", type=str, help="Dedicated folder for this batch run")
     parser.add_argument("--python-bin", type=str, default="python3.12", help="Python binary for backtest command")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")

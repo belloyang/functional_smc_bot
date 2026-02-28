@@ -1,0 +1,11 @@
+{
+  "symbol": "QQQ",
+  "options": true,
+  "cap": 5,
+  "session_duration": 6,
+  "min_conf": "medium",
+  "state_file": "trade_state_QQQ.json",
+  "option_allocation": 0.5,
+  "max_option_contracts": -1,
+  "ignore_pdt": true
+}
