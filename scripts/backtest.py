@@ -60,8 +60,87 @@ def black_scholes_price(S, K, T, r, sigma, type='call'):
         price = K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
         
     return price
+def norm_pdf(x):
+    return math.exp(-0.5 * x**2) / math.sqrt(2.0 * math.pi)
 
+def black_scholes_delta(S, K, T, r, sigma, type='call'):
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        intrinsic = 1.0 if (type == 'call' and S > K) else -1.0 if (type == 'put' and S < K) else 0.0
+        return intrinsic
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    if type == 'call':
+        return norm_cdf(d1)
+    return norm_cdf(d1) - 1.0
 
+def black_scholes_theta(S, K, T, r, sigma, type='call'):
+    """
+    Returns theta per day (negative for long options).
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    first = -(S * norm_pdf(d1) * sigma) / (2.0 * math.sqrt(T))
+    if type == 'call':
+        second = -r * K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        second = r * K * math.exp(-r * T) * norm_cdf(-d2)
+    return (first + second) / 365.0
+
+def select_backtest_option_contract(S, sigma, signal, r=0.04):
+    """
+    Greek-aware synthetic contract picker for backtest parity with live intent:
+    prefer moderate delta, lower theta decay, and slightly longer DTE (overnight-friendly).
+    """
+    min_dte = int(getattr(config, "OPTION_MIN_DTE", 5))
+    max_dte = int(getattr(config, "OPTION_MAX_DTE", 21))
+    target_dte = float(getattr(config, "OPTION_TARGET_DTE", 12))
+    target_delta = float(getattr(config, "OPTION_TARGET_DELTA", 0.55))
+
+    # Strike ladder around spot (1-point spacing) to mimic listed strikes.
+    lo = int(round(S * 0.94))
+    hi = int(round(S * 1.06))
+    dtes = sorted({d for d in [min_dte, 7, 10, 14, max_dte] if min_dte <= d <= max_dte})
+    if not dtes:
+        dtes = [7]
+
+    right = 'call' if signal == "buy" else 'put'
+    best = None
+    best_score = float("inf")
+    for dte in dtes:
+        T = dte / 365.0
+        for K in range(lo, hi + 1):
+            premium = black_scholes_price(S, K, T, r, sigma, type=right)
+            if premium <= 0:
+                continue
+            delta = black_scholes_delta(S, K, T, r, sigma, type=right)
+            if right == 'put':
+                delta = abs(delta)
+            theta_day = abs(black_scholes_theta(S, K, T, r, sigma, type=right))
+
+            dte_penalty = abs(dte - target_dte) / max(1.0, target_dte)
+            delta_penalty = abs(delta - target_delta)
+            theta_penalty = theta_day / max(0.001, premium)  # time decay efficiency
+            moneyness_penalty = abs(K - S) / max(1.0, S)
+
+            score = (
+                1.25 * delta_penalty
+                + 1.10 * theta_penalty
+                + 0.75 * dte_penalty
+                + 0.60 * moneyness_penalty
+            )
+            if score < best_score:
+                best_score = score
+                best = (K, dte, premium, right)
+
+    if best is None:
+        # Fallback
+        dte = max(7, min_dte)
+        K = round(S)
+        T = dte / 365.0
+        premium = black_scholes_price(S, K, T, r, sigma, type=right)
+        return K, dte, premium, right
+    return best
 
 def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=10000.0, use_daily_cap=True, daily_cap_value=5, option_allocation_pct=0.20, max_option_contracts=-1, min_conf_val=0, max_iv=0.40, allow_no_iv=False, ignore_pdt=False):
     if symbol is None:
@@ -261,7 +340,132 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         price = current_bar['close']
         
-        # --- BOOKKEEPING (Must happen every bar) ---
+        # --- RISK CHECKS (Before Signal) ---
+        current_option_price = 0
+        if position != 0 and active_trade and is_market_open:
+            if trade_type == "stock":
+                # 1. Stop Loss Hit
+                if price <= active_trade['stop_loss']:
+                    exit_price = active_trade['stop_loss']
+                    proceeds = position * exit_price
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * position
+                    trades.append({'time': current_time_et, 'type': 'stop_loss_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] 🛑 STOCK STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
+                    position = 0
+                    active_trade = None
+                    last_exit_time = current_time_utc
+                    continue
+
+                # 2. Take Profit Hit
+                if price >= active_trade['take_profit']:
+                    exit_price = active_trade['take_profit']
+                    proceeds = position * exit_price
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * position
+                    trades.append({'time': current_time_et, 'type': 'take_profit_stock', 'price': exit_price, 'qty': position, 'pnl': pnl})
+                    print(f"[{current_time_et}] 🎯 STOCK TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
+                    position = 0
+                    active_trade = None
+                    last_exit_time = current_time_utc
+                    continue
+
+                # 3. Active Management
+                pl_pct = (price - entry_price) / entry_price
+                # --- STEPPED TRAILING STOP LOGIC ---
+                STEP_SIZE = 0.10
+                if pl_pct >= STEP_SIZE:
+                    milestone = int(pl_pct * 10) / 10.0
+                    lock_pct = milestone - 0.10
+                    target_stop = entry_price * (1 + lock_pct)
+                    
+                    if active_trade['stop_loss'] < target_stop:
+                        active_trade['stop_loss'] = target_stop
+                        if lock_pct <= 0.001:
+                             print(f"[{current_time_et}] 🛡️ BREAK EVEN: up {pl_pct*100:.1f}%. SL -> Entry ({target_stop:.2f})")
+                        else:
+                             print(f"[{current_time_et}] 💰 PROFIT LOCK: up {pl_pct*100:.1f}%. SL -> {target_stop:.2f} (+{lock_pct*100:.0f}%)")
+
+            elif trade_type == "options":
+                time_held = current_time_utc - active_trade['entry_time']
+                days_passed = time_held.total_seconds() / (24 * 3600)
+                T_remain = max(0.0001, (active_trade['expiry_days'] - days_passed) / 365.0)
+                sigma = current_vol if current_vol > 0 else 0.2
+                
+                # Recalculate Option Value
+                current_option_price = black_scholes_price(price, active_trade['strike'], T_remain, 0.04, sigma, type=active_trade['type'])
+                
+                # 1. Stop Loss Hit
+                if current_option_price <= active_trade['stop_loss']:
+                    exit_price = active_trade['stop_loss']
+                    proceeds = exit_price * 100 * abs(position)
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * 100 * abs(position)
+                    trades.append({'time': current_time_et, 'type': f"stop_loss_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                    print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    if pnl < 0:
+                        last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
+                    position = 0
+                    active_trade = None
+                    last_exit_time = current_time_utc
+                    continue
+
+                # 2. Take Profit Hit
+                if current_option_price >= active_trade['take_profit']:
+                    exit_price = active_trade['take_profit']
+                    proceeds = exit_price * 100 * abs(position)
+                    balance += proceeds
+                    pnl = (exit_price - entry_price) * 100 * abs(position)
+                    trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                    print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
+                    position = 0
+                    active_trade = None
+                    last_exit_time = current_time_utc
+                    continue
+                    
+                # 3. Active Management (Hybrid Trailing)
+                pl_pct = (current_option_price - entry_price) / entry_price
+                
+                # Hybrid Strategy: +10% BE, +20% -> +10%, +30% -> +20%, +40% -> +30%
+                if pl_pct >= 0.40:
+                    lock_price = entry_price * 1.30 # +30% SL
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +30% ({lock_price:.2f})")
+                elif pl_pct >= 0.30:
+                    lock_price = entry_price * 1.20 # +20% SL
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +20% ({lock_price:.2f})")
+                elif pl_pct >= 0.20:
+                    lock_price = entry_price * 1.10 # +10% SL
+                    if active_trade['stop_loss'] < lock_price:
+                        active_trade['stop_loss'] = lock_price
+                        print(f"[{current_time_et}] 💰 OPTION TRAILING (HYBRID): LOCKED +10% ({lock_price:.2f})")
+                elif pl_pct >= 0.10 and active_trade['stop_loss'] < entry_price:
+                    active_trade['stop_loss'] = entry_price
+                    print(f"[{current_time_et}] 🛡️ OPTION TRAILING (HYBRID): MOVED TO BE ({entry_price:.2f})")
+                
+                # 4. Expiry Guard (Sync with bot.py: Close ON expiration day)
+                is_expiry_day = (current_time_utc.date() >= active_trade['expiry_date'].date())
+                if is_expiry_day:
+                     exit_price = current_option_price
+                     proceeds = exit_price * 100 * abs(position)
+                     balance += proceeds
+                     pnl = (exit_price - entry_price) * 100 * abs(position)
+                     trades.append({'time': current_time_et, 'type': 'expiry_close', 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
+                     print(f"[{current_time_et}] ⚠️ EXPIRY EXIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
+                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
+                     position = 0
+                     active_trade = None
+                     last_exit_time = current_time_utc
+                     continue
         current_date = current_time_et.date()
         if last_trade_date != current_date:
             daily_trade_count = 0
@@ -301,7 +505,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += position * price
                          pnl = (price - entry_price) * position
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': price, 'qty': position, 'pnl': pnl})
-                         _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
                      elif trade_type == "options":
@@ -312,7 +516,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                          balance += exit_pr * 100 * abs(position)
                          pnl = (exit_pr - entry_price) * 100 * abs(position)
                          trades.append({'time': current_time_et, 'type': 'daily_stop_exit', 'price': exit_pr, 'qty': abs(position), 'pnl': pnl})
-                         _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                         _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                          position = 0
                          active_trade = None
              continue
