@@ -55,3 +55,4 @@ MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from p
 COOL_DOWN_MINUTES = 15        # Wait period after any losing trade
 MAX_ALLOWED_IV = 0.40  # 40%
 ALLOW_TRADE_WITHOUT_IV = True  # If True, bot will proceed when IV snapshot is missing
+IGNORE_PDT = False  # If True, PDT rule is bypassed when balance < $25,000

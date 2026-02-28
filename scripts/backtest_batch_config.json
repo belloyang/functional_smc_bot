@@ -19,5 +19,6 @@
   "cap": 5,
   "option_allocation": 1.0,
   "max_option_contracts": -1,
-  "min_conf": "all"
+  "min_conf": "all",
+  "ignore_pdt": true
 }
