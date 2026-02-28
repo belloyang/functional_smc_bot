@@ -952,4 +952,4 @@ if __name__ == "__main__":
         min_conf_val=min_conf_val,
         max_iv=args.max_iv,
         allow_no_iv=args.allow_no_iv or getattr(config, 'ALLOW_TRADE_WITHOUT_IV', False),
-        ignore_pdt=args.ignore_pdt)
+        ignore_pdt=args.ignore_pdt or getattr(config, 'IGNORE_PDT', False))
