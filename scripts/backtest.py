@@ -202,8 +202,14 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         in_window = (trade_window_start <= current_time_et <= trade_window_end)
         
+        # Regular Market Hours (9:30 AM - 4:00 PM ET) for managing existing positions
+        market_open = current_time_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = current_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        is_market_open = (market_open <= current_time_et <= market_close)
+
         # We don't 'continue' here because we still want to manage open positions
-        # outside the entry window (e.g. for stops/targets during the first 30 mins).
+        # outside the entry window (e.g. for stops/targets during the first 30 mins),
+        # but we MUST stay within regular market hours for options.
 
         # --- DAYS BACK ENFORCEMENT ---
         # We fetched extra data for warmup, but we only want to trade starting from days_back
@@ -229,7 +235,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         # --- RISK CHECKS (Before Signal) ---
         current_option_price = 0
-        if position != 0 and active_trade:
+        if position != 0 and active_trade and is_market_open:
             if trade_type == "stock":
                 # 1. Stop Loss Hit
                 if price <= active_trade['stop_loss']:
@@ -386,7 +392,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
 
         # Portfolio Loss Circuit Breaker (3% Daily Max) — matches live bot threshold
         daily_pnl_pct = (current_equity - day_starting_balance) / day_starting_balance if day_starting_balance > 0 else 0
-        if daily_pnl_pct <= -0.03:
+        if daily_pnl_pct <= -0.03 and is_market_open:
              if not daily_stop_hit:
                  print(f"[{current_time_et}] 🛑 DAILY LOSS LIMIT HIT (-3%). STOPPING FOR DAY.")
                  daily_stop_hit = True
