@@ -89,7 +89,7 @@ def run(symbol: str, min_conf: str = "all", watch: bool = False, interval_sec: i
 def _fetch_for_scan(symbol: str):
     try:
         htf_raw = get_bars(symbol, TimeFrame(15, TimeFrameUnit.Minute), 10000)
-        ltf_raw = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 10000)
+        ltf_raw = get_bars(symbol, TimeFrame(1, TimeFrameUnit.Minute), 20000)
     except Exception:
         return None, None, None
     if htf_raw is None or ltf_raw is None or htf_raw.empty or ltf_raw.empty:

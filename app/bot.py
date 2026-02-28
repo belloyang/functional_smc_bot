@@ -372,9 +372,9 @@ def get_strategy_signal(htf: pd.DataFrame, ltf: pd.DataFrame):
     # Avoid entering longs into overbought HTF conditions and shorts into oversold ones.
     rsi = last_htf.get('rsi14', None)
     if rsi is not None and not pd.isna(rsi):
-        if bias == "bullish" and rsi > 75:
+        if bias == "bullish" and rsi > 77.5:
             return None, 0  # Overbought — risk of mean reversion against the trade
-        elif bias == "bearish" and rsi < 25:
+        elif bias == "bearish" and rsi < 22.5:
             return None, 0  # Oversold — risk of bounce against the trade
 
     # 2. LTF Analysis
