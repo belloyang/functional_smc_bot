@@ -9,6 +9,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 def norm_cdf(x):
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
 
+def norm_pdf(x):
+    return (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x**2)
+
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta, timezone
@@ -396,31 +399,24 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # 1. Stop Loss Hit
                 if current_option_price <= active_trade['stop_loss']:
                     exit_price = active_trade['stop_loss']
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"stop_loss_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    if pnl < 0:
-                        last_loss_exit_time = current_time_utc
-                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
-                    position = 0
-                    active_trade = None
-                    last_exit_time = current_time_utc
+                    if pnl < 0: last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                    position = 0; active_trade = None; last_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
-                if current_option_price >= active_trade['take_profit']:
+                elif current_option_price >= active_trade['take_profit']:
                     exit_price = active_trade['take_profit']
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
-                    position = 0
-                    active_trade = None
-                    last_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                    position = 0; active_trade = None; last_exit_time = current_time_utc
                     continue
                     
                 # 3. Active Management (Hybrid Trailing)
@@ -597,9 +593,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
                 elif trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
-                    T = days_to_expiry / 365.0
+
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
@@ -614,7 +608,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             continue  # Skip trade when IV exceeds cap
                         sigma = iv_val
                     
-                    premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
+                    res_opt = select_backtest_option_contract(price, sigma, "buy")
+                    strike, days_to_expiry, premium, opt_type = res_opt
+                    if premium <= 0:
+                        continue
+                    
+                    T = days_to_expiry / 365.0
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
@@ -696,8 +695,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Short (Options only)
                 if trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
+
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
@@ -711,7 +709,12 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                             continue
                         sigma = iv_val
                         
-                    premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
+                    res_opt = select_backtest_option_contract(price, sigma, "sell")
+                    strike, days_to_expiry, premium, opt_type = res_opt
+                    if premium <= 0:
+                        continue
+                    
+                    T = days_to_expiry / 365.0
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
