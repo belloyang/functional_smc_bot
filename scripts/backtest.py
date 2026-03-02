@@ -696,24 +696,21 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
                 elif trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
-                    T = days_to_expiry / 365.0
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
                     if iv is None:
-                        if not allow_no_iv:
-                            # Missing IV and strict mode: skip entry
-                            continue
                         sigma = 0.20  # fallback when allowed
                     else:
                         iv_val = iv / 100.0 if iv > 2 else iv
-                        if iv_val > max_iv:
-                            continue  # Skip trade when IV exceeds cap
                         sigma = iv_val
                     
-                    premium = black_scholes_price(price, strike, T, 0.04, sigma, type='call')
+                    res_opt = select_backtest_option_contract(price, sigma, "buy")
+                    strike, days_to_expiry, premium, opt_type = res_opt
+                    if premium <= 0:
+                        continue
+                    
+                    T = days_to_expiry / 365.0
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
@@ -795,22 +792,21 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Short (Options only)
                 if trade_type == "options":
-                    strike = round(price)
-                    days_to_expiry = 7
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
                     if iv is None:
-                        if not allow_no_iv:
-                            continue
                         sigma = 0.20
                     else:
                         iv_val = iv / 100.0 if iv > 2 else iv
-                        if iv_val > max_iv:
-                            continue
                         sigma = iv_val
                         
-                    premium = black_scholes_price(price, strike, days_to_expiry/365.0, 0.04, sigma, type='put')
+                    res_opt = select_backtest_option_contract(price, sigma, "sell")
+                    strike, days_to_expiry, premium, opt_type = res_opt
+                    if premium <= 0:
+                        continue
+                    
+                    T = days_to_expiry / 365.0
                     contract_cost = premium * 100
 
                     total_budget = balance * option_allocation_pct
