@@ -301,6 +301,38 @@ def _round_to_tick(price: float, tick: float) -> float:
     return round(round(price / tick) * tick, 8)
     return None
 
+
+def _build_fill_friendly_bracket(ib, action, qty, entry_price, tp_price, sl_price, min_tick=0.01):
+    """
+    Build an IBKR bracket order with a fill-friendly entry policy.
+
+    Config:
+    - BRACKET_ENTRY_MODE: 'market' (default) or 'loose_limit'
+    - BRACKET_ENTRY_SLIPPAGE_BPS: extra limit looseness for loose_limit mode
+    """
+    action = str(action).upper()
+    mode = str(getattr(config, 'BRACKET_ENTRY_MODE', 'market')).strip().lower()
+
+    bracket = ib.bracketOrder(action, qty, float(entry_price), float(tp_price), float(sl_price))
+    parent = bracket[0]
+
+    if mode in {'market', 'mkt'}:
+        parent.orderType = 'MKT'
+        if hasattr(parent, 'lmtPrice'):
+            parent.lmtPrice = 0
+        print(f"ℹ️ Bracket entry mode=market ({action})")
+        return bracket
+
+    slippage_bps = float(getattr(config, 'BRACKET_ENTRY_SLIPPAGE_BPS', 15))
+    slippage_bps = max(0.0, slippage_bps)
+    if action == 'BUY':
+        loose_entry = float(entry_price) * (1.0 + slippage_bps / 10000.0)
+    else:
+        loose_entry = float(entry_price) * (1.0 - slippage_bps / 10000.0)
+    parent.lmtPrice = _round_to_tick(loose_entry, min_tick)
+    print(f"ℹ️ Bracket entry mode=loose_limit ({action}) bps={slippage_bps:.1f} -> {parent.lmtPrice}")
+    return bracket
+
 # ================= SMC LOGIC (CAUSAL) =================
 
 def detect_swing_highs_lows(df, window=3):
@@ -1371,7 +1403,15 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 print(f"Sizing: Equity ${equity:.2f} | Risk Target ${current_risk_target:.2f} | Risk/Ctr ${risk_per_contract:.2f} | Budget ${available_budget:.2f} | Qty: {qty}")
                 # Place Bracket
                 action = 'BUY'
-                bracket = ib.bracketOrder(action, qty, entry_est, tp_price, sl_price)
+                bracket = _build_fill_friendly_bracket(
+                    ib,
+                    action,
+                    qty,
+                    entry_est,
+                    tp_price,
+                    sl_price,
+                    min_tick=min_tick,
+                )
                 for o in bracket:
                     o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(opt_contract, o)
@@ -1436,7 +1476,15 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
             
             try:
                 contract = Stock(symbol, 'SMART', 'USD')
-                bracket = ib.bracketOrder('BUY', qty, price, tp_price, sl_price)
+                bracket = _build_fill_friendly_bracket(
+                    ib,
+                    'BUY',
+                    qty,
+                    price,
+                    tp_price,
+                    sl_price,
+                    min_tick=0.01,
+                )
                 for o in bracket:
                     o.tif = 'DAY' # Ensure TIF is explicit
                     ib.placeOrder(contract, o)
