@@ -1436,9 +1436,8 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     # --- NEW FALLBACK: Historical Midpoint ---
                     print(f"ℹ️ Attempting historical fallback for {opt_contract.localSymbol}...")
-                is_valid_quote = (bid > 0 and ask > 0 and ask >= bid)
-                spread = (ask - bid) if is_valid_quote else 0.0
-                mid = ((bid + ask) / 2.0) if is_valid_quote else 0.0
+                    entry_est = await get_latest_price_fallback(opt_contract)
+
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
