@@ -73,8 +73,11 @@ DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
 # Entry mode for bracket parent order:
 # - "market": use MKT parent for best fill probability
 # - "loose_limit": use adjusted LMT parent with configurable slippage buffer
-BRACKET_ENTRY_MODE = os.getenv("BRACKET_ENTRY_MODE", "market").strip().lower()
+BRACKET_ENTRY_MODE = os.getenv("BRACKET_ENTRY_MODE", "loose_limit").strip().lower()
 BRACKET_ENTRY_SLIPPAGE_BPS = float(os.getenv("BRACKET_ENTRY_SLIPPAGE_BPS", "15"))
+# Maximum allowed option bid/ask spread as a fraction of mid price.
+# Example: 0.20 = 20% max spread. Set negative to disable this guard.
+OPTIONS_MAX_SPREAD_PCT = float(os.getenv("OPTIONS_MAX_SPREAD_PCT", "0.20"))
 
 # --- DRAWDOWN & BEHAVIORAL SAFETY ---
 MAX_GLOBAL_DRAWDOWN = 0.25    # Circuit breaker: Halt trading at 25% drop from peak

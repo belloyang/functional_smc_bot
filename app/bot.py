@@ -333,6 +333,122 @@ def _build_fill_friendly_bracket(ib, action, qty, entry_price, tp_price, sl_pric
     print(f"ℹ️ Bracket entry mode=loose_limit ({action}) bps={slippage_bps:.1f} -> {parent.lmtPrice}")
     return bracket
 
+
+async def _submit_bracket_with_guard(ib, contract, bracket, label=""):
+    """
+    Submit bracket orders and verify child exits were accepted.
+    If children are missing after parent fills, submit fallback OCA TP/SL exits.
+    """
+    placed_trades = []
+    for order in bracket:
+        order.tif = 'DAY'
+        placed_trades.append(ib.placeOrder(contract, order))
+
+    parent = bracket[0]
+    parent_id = int(getattr(parent, 'orderId', 0) or 0)
+
+    # Poll for child orders to appear instead of relying on a fixed sleep.
+    timeout_sec = 5.0
+    poll_interval = 0.2
+    start_time = time.monotonic()
+    related_child_count = 0
+    while time.monotonic() - start_time < timeout_sec:
+        related_child_count = 0
+        for t in ib.openTrades():
+            c = t.contract
+            o = t.order
+            if getattr(c, 'conId', None) != getattr(contract, 'conId', None):
+                continue
+            parent_ref = int(getattr(o, 'parentId', 0) or 0)
+            if parent_ref == parent_id:
+                related_child_count += 1
+        if related_child_count >= 2:
+            break
+        await asyncio.sleep(poll_interval)
+
+    if related_child_count >= 2:
+        return placed_trades
+
+    status_parts = []
+    for t in placed_trades:
+        oid = getattr(getattr(t, 'order', None), 'orderId', '?')
+        st = getattr(getattr(t, 'orderStatus', None), 'status', '?')
+        status_parts.append(f"{oid}:{st}")
+    print(
+        f"⚠️ Bracket child verification warning for {label or getattr(contract, 'localSymbol', '?')}: "
+        f"parentId={parent_id}, child_count={related_child_count}, statuses={'; '.join(status_parts)}"
+    )
+
+    try:
+        parent_action = str(getattr(parent, 'action', 'BUY')).upper()
+        fallback_exit_action = 'SELL' if parent_action == 'BUY' else 'BUY'
+
+        pos_qty = 0
+        for p in ib.positions():
+            if getattr(p.contract, 'conId', None) != getattr(contract, 'conId', None):
+                continue
+            if p.position == 0:
+                continue
+            pos_qty = int(abs(p.position))
+            fallback_exit_action = 'SELL' if p.position > 0 else 'BUY'
+            break
+
+        if pos_qty < 1:
+            return placed_trades
+
+        active_exits = 0
+        for t in ib.openTrades():
+            c = t.contract
+            o = t.order
+            if getattr(c, 'conId', None) != getattr(contract, 'conId', None):
+                continue
+            if str(getattr(o, 'action', '')).upper() != fallback_exit_action:
+                continue
+            status = str(getattr(t.orderStatus, 'status', '') or '').lower()
+            if status in {'filled', 'cancelled', 'inactive'}:
+                continue
+            active_exits += 1
+
+        if active_exits >= 2:
+            return placed_trades
+
+        tp_price = float(getattr(bracket[1], 'lmtPrice', 0) or 0)
+        sl_price = float(
+            getattr(bracket[2], 'auxPrice', 0) or getattr(bracket[2], 'lmtPrice', 0) or 0
+        )
+        if tp_price <= 0 or sl_price <= 0:
+            print(
+                f"⚠️ Cannot submit fallback OCA exits for {label}: "
+                f"invalid TP/SL ({tp_price}, {sl_price})"
+            )
+            return placed_trades
+
+        oca_group = f"OCA_{getattr(contract, 'conId', 'X')}_{int(time.time())}"
+        tp_order = LimitOrder(fallback_exit_action, pos_qty, tp_price)
+        sl_order = StopOrder(fallback_exit_action, pos_qty, sl_price)
+
+        tp_order.tif = 'DAY'
+        sl_order.tif = 'DAY'
+        tp_order.ocaGroup = oca_group
+        sl_order.ocaGroup = oca_group
+        tp_order.ocaType = 1
+        sl_order.ocaType = 1
+
+        tp_trade = ib.placeOrder(contract, tp_order)
+        sl_trade = ib.placeOrder(contract, sl_order)
+        placed_trades.extend([tp_trade, sl_trade])
+
+        tp_order_id = getattr(getattr(tp_trade, 'order', None), 'orderId', None)
+        sl_order_id = getattr(getattr(sl_trade, 'order', None), 'orderId', None)
+        print(
+            f"🛡️ Fallback OCA exits submitted for {label or getattr(contract, 'localSymbol', '?')}: "
+            f"Qty {pos_qty} | TP {tp_price} (orderId={tp_order_id}) | SL {sl_price} (orderId={sl_order_id})"
+        )
+    except Exception as e:
+        print(f"⚠️ Fallback exit placement failed for {label or getattr(contract, 'localSymbol', '?')}: {e}")
+
+    return placed_trades
+
 # ================= SMC LOGIC (CAUSAL) =================
 
 def detect_swing_highs_lows(df, window=3):
@@ -1320,8 +1436,9 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     # --- NEW FALLBACK: Historical Midpoint ---
                     print(f"ℹ️ Attempting historical fallback for {opt_contract.localSymbol}...")
-                    entry_est = await get_latest_price_fallback(opt_contract)
-
+                is_valid_quote = (bid > 0 and ask > 0 and ask >= bid)
+                spread = (ask - bid) if is_valid_quote else 0.0
+                mid = ((bid + ask) / 2.0) if is_valid_quote else 0.0
                 if not entry_est or entry_est <= 0 or np.isnan(entry_est):
                     print(f"Invalid option ask price for {opt_contract.localSymbol}. Skipping.")
                     return
@@ -1331,6 +1448,18 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 bid = float(getattr(ticker, "bid", 0) or 0) if ticker else 0.0
                 ask = float(getattr(ticker, "ask", 0) or 0) if ticker else 0.0
                 last = float(getattr(ticker, "last", 0) or 0) if ticker else 0.0
+                spread = (ask - bid) if (bid > 0 and ask > 0 and ask >= bid) else 0.0
+                mid = ((bid + ask) / 2.0) if (bid > 0 and ask > 0 and ask >= bid) else 0.0
+                spread_pct = (spread / mid) if mid > 0 else None
+
+                max_spread_pct = float(getattr(config, 'OPTIONS_MAX_SPREAD_PCT', 0.20))
+                if spread_pct is not None and max_spread_pct >= 0 and spread_pct > max_spread_pct:
+                    print(
+                        f"⚠️ Spread guard: skipping {opt_contract.localSymbol} | "
+                        f"Bid {bid:.2f} Ask {ask:.2f} Spread {spread:.2f} "
+                        f"({spread_pct*100:.1f}%) > Max {max_spread_pct*100:.1f}%"
+                    )
+                    return
 
                 # Discover price increment from contract details (fallback 0.01).
                 min_tick = 0.01
@@ -1342,7 +1471,6 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     pass
 
                 if bid > 0 and ask > 0 and ask >= bid:
-                    spread = ask - bid
                     # Place slightly above mid but never above ask to reduce overpay/rejections.
                     raw_entry = min(ask, ((bid + ask) / 2.0) + 0.25 * spread)
                 elif ask > 0:
@@ -1359,6 +1487,17 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 if entry_est <= 0:
                     print(f"Invalid normalized entry price for {opt_contract.localSymbol}. Skipping.")
                     return
+
+                entry_mode = str(getattr(config, 'BRACKET_ENTRY_MODE', 'market')).strip().lower()
+                spread_text = f"{(spread_pct*100):.1f}%" if spread_pct is not None else "N/A"
+                print(
+                    f"Quote snapshot: Bid {bid:.2f} | Ask {ask:.2f} | Last {last:.2f} | "
+                    f"Spread {spread_text} | Mode {entry_mode}"
+                )
+                if entry_mode in {'market', 'mkt'}:
+                    print(
+                        f"⚠️ Market entry can fill away from Est.Entry ({entry_est}) in fast/wide option books."
+                    )
 
                 sl_price = _round_to_tick(entry_est * 0.80, min_tick)
                 tp_price = _round_to_tick(entry_est * 1.50, min_tick)
@@ -1412,9 +1551,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     sl_price,
                     min_tick=min_tick,
                 )
-                for o in bracket:
-                    o.tif = 'DAY' # Ensure TIF is explicit
-                    ib.placeOrder(opt_contract, o)
+                await _submit_bracket_with_guard(ib, opt_contract, bracket, label=opt_contract.localSymbol)
                 
                 # Notify
                 send_discord_live_trading_notification(
@@ -1485,9 +1622,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     sl_price,
                     min_tick=0.01,
                 )
-                for o in bracket:
-                    o.tif = 'DAY' # Ensure TIF is explicit
-                    ib.placeOrder(contract, o)
+                await _submit_bracket_with_guard(ib, contract, bracket, label=symbol)
                 
                 # Notify
                 send_discord_live_trading_notification(
