@@ -247,8 +247,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # --- GLOBAL SAFETY INITIALIZATION ---
     global_drawdown_hit = False
     last_loss_exit_time = None
-    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 15)
-    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
+    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 60)
+    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.15)
     peak_equity = initial_balance
     
     # --- PDT RULE ---
@@ -675,6 +675,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
         elif signal == "sell":
             # 1. HARD BLOCK CHECK (Confidence 0)
@@ -764,6 +765,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
                 elif trade_type == "options":
                     exit_price = current_option_price
                     if exit_price == 0:
@@ -779,6 +781,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
         # --- (Removed) Redundant Equity Tracking Block ---
 
@@ -888,7 +891,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         output_dir = os.path.join(os.getcwd(), "backtest-output", trade_type, symbol)
         os.makedirs(output_dir, exist_ok=True)
-        plot_path = os.path.join(output_dir, f"backtest_{mode}_{symbol}_{initial_balance}_{days_back}.png")
+        plot_path = os.path.join(output_dir, f"backtest_{trade_type}_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
         print(f"\n📊 Equity curve saved to: {plot_path}")
 

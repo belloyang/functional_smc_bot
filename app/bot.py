@@ -768,7 +768,8 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
     safety = load_global_safety_state()
     if safety.get("halted", False):
         print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
-        
+        return False
+
     if safety.get("last_loss_time"):
         last_loss = datetime.fromisoformat(safety["last_loss_time"])
         wait_mins = getattr(config, 'COOL_DOWN_MINUTES', 60)
@@ -990,7 +991,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                 # 1. Global Option Exposure Check
                 existing_option_exposure = 0.0
                 for p in all_positions:
-                    if p.asset_class == 'us_option':
+                    if p.asset_class.value == 'us_option':
                         existing_option_exposure += abs(float(p.market_value))
                 
                 global_option_remaining = total_budget - existing_option_exposure
@@ -1209,6 +1210,7 @@ def place_trade(signal, symbol, confidence=0, use_daily_cap=True, daily_cap_valu
                     confidence=confidence,
                     strategy_bias=bias
                 )
+                return True
             except Exception as e:
                  print(f"❌ Close Long failed: {e}")
                  return False
@@ -1258,7 +1260,7 @@ def manage_option_expiry(target_symbol=None):
         now = datetime.now()
         
         for pos in positions:
-            if pos.asset_class != 'us_option':
+            if pos.asset_class.value != 'us_option':
                 continue
             
             if target_symbol and not pos.symbol.startswith(target_symbol):
@@ -1392,7 +1394,7 @@ def manage_trade_updates(target_symbol=None):
                 continue
             # Skip if we can't determine direction clearly (assuming Long for simplicity or checking side)
             # Both Stock Long and Option Long (Call/Put) have side='long' in Position object typically
-            is_long = pos.side == 'long'
+            is_long = pos.side == PositionSide.LONG
             if not is_long: continue # Skip short management for MVP simplicity
 
             entry_price = float(pos.avg_entry_price)
@@ -1400,7 +1402,7 @@ def manage_trade_updates(target_symbol=None):
             pl_pct = float(pos.unrealized_plpc)
             
             # --- OPTIONS RISK MANAGEMENT (Manual) ---
-            if pos.asset_class == 'us_option':
+            if pos.asset_class.value == 'us_option':
                 state = load_trade_state(symbol=symbol)
                 symbol_state = state.get(symbol, {"virtual_stop": -0.20}) # Default -20% SL
                 virtual_stop = symbol_state.get("virtual_stop", -0.20)
