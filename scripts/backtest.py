@@ -9,6 +9,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 def norm_cdf(x):
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
 
+def norm_pdf(x):
+    return (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x**2)
+
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta, timezone
@@ -246,8 +249,8 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
     # --- GLOBAL SAFETY INITIALIZATION ---
     global_drawdown_hit = False
     last_loss_exit_time = None
-    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 15)
-    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.20)
+    COOL_DOWN_MINUTES = getattr(config, 'COOL_DOWN_MINUTES', 60)
+    MAX_DRAWDOWN_PCT = getattr(config, 'MAX_GLOBAL_DRAWDOWN', 0.15)
     peak_equity = initial_balance
     
     # --- PDT RULE ---
@@ -402,31 +405,24 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                 # 1. Stop Loss Hit
                 if current_option_price <= active_trade['stop_loss']:
                     exit_price = active_trade['stop_loss']
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"stop_loss_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🛑 OPTION STOP HIT   @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    if pnl < 0:
-                        last_loss_exit_time = current_time_utc
-                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
-                    position = 0
-                    active_trade = None
-                    last_exit_time = current_time_utc
+                    if pnl < 0: last_loss_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                    position = 0; active_trade = None; last_exit_time = current_time_utc
                     continue
 
                 # 2. Take Profit Hit
-                if current_option_price >= active_trade['take_profit']:
+                elif current_option_price >= active_trade['take_profit']:
                     exit_price = active_trade['take_profit']
-                    proceeds = exit_price * 100 * abs(position)
-                    balance += proceeds
+                    balance += exit_price * 100 * abs(position)
                     pnl = (exit_price - entry_price) * 100 * abs(position)
                     trades.append({'time': current_time_et, 'type': f"take_profit_{active_trade['type']}", 'price': exit_price, 'qty': abs(position), 'pnl': pnl})
                     print(f"[{current_time_et}] 🎯 OPTION TARGET HIT @ {exit_price:.2f} | PnL: {pnl:.2f}")
-                    _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
-                    position = 0
-                    active_trade = None
-                    last_exit_time = current_time_utc
+                    _register_day_trade(active_trade.get('entry_time'), current_time_utc)
+                    position = 0; active_trade = None; last_exit_time = current_time_utc
                     continue
                     
                 # 3. Active Management (Hybrid Trailing)
@@ -696,6 +692,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                         next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
                 elif trade_type == "options":
+
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
@@ -772,6 +769,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
         elif signal == "sell":
             # 1. HARD BLOCK CHECK (Confidence 0)
@@ -792,6 +790,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
             if position == 0 and in_window and trade_count_ok and conf_ok and can_enter_by_time and not pdt_entry_blocked:
                 # Enter Short (Options only)
                 if trade_type == "options":
+
                     iv = None
                     if current_vol is not None and not np.isnan(current_vol):
                         iv = current_vol
@@ -856,6 +855,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
                 elif trade_type == "options":
                     exit_price = current_option_price
                     if exit_price == 0:
@@ -871,6 +871,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
                     _register_day_trade(active_trade.get('entry_time') if active_trade else None, current_time_utc)
                     position = 0
                     active_trade = None
+                    next_entry_allowed_time = current_time_utc + timedelta(minutes=5)
 
         # --- (Removed) Redundant Equity Tracking Block ---
 
@@ -980,7 +981,7 @@ def run_backtest(days_back=30, symbol=None, trade_type="stock", initial_balance=
         
         output_dir = os.path.join(os.getcwd(), "backtest-output", trade_type, symbol)
         os.makedirs(output_dir, exist_ok=True)
-        plot_path = os.path.join(output_dir, f"backtest_{mode}_{symbol}_{initial_balance}_{days_back}.png")
+        plot_path = os.path.join(output_dir, f"backtest_{trade_type}_{symbol}_{initial_balance}_{days_back}.png")
         plt.savefig(plot_path)
         print(f"\n📊 Equity curve saved to: {plot_path}")
 

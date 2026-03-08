@@ -1215,7 +1215,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
     if safety.get("halted", False):
         print("🚨 TRADING HALTED: Global Drawdown Circuit Breaker is ACTIVE. No new trades allowed.")
         return
-        
+
     if safety.get("last_loss_time"):
         try:
             last_loss = datetime.fromisoformat(safety["last_loss_time"])
@@ -1896,7 +1896,6 @@ async def manage_trade_updates(target_symbol):
             if isinstance(contract, Option):
                 state = load_trade_state(symbol)
                 symbol_state = state.get(symbol, {"virtual_stop": -0.20})
-                virtual_stop = symbol_state.get("virtual_stop", -0.20)
                 
                 # Exit Triggers
                 if pl_pct <= virtual_stop:
