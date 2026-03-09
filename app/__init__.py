@@ -1,1 +1,1 @@
-__version__ = "1.5.3-ibkr"
+__version__ = "1.5.4-ibkr-rc"
