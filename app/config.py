@@ -75,6 +75,11 @@ DEFAULT_DAILY_CAP = 5         # Default daily trade cap if none provided
 # - "loose_limit": use adjusted LMT parent with configurable slippage buffer
 BRACKET_ENTRY_MODE = os.getenv("BRACKET_ENTRY_MODE", "loose_limit").strip().lower()
 BRACKET_ENTRY_SLIPPAGE_BPS = float(os.getenv("BRACKET_ENTRY_SLIPPAGE_BPS", "15"))
+BRACKET_ENTRY_INITIAL_WAIT_SEC = float(os.getenv("BRACKET_ENTRY_INITIAL_WAIT_SEC", "8"))
+BRACKET_ENTRY_FINAL_WAIT_SEC = float(os.getenv("BRACKET_ENTRY_FINAL_WAIT_SEC", "5"))
+BRACKET_ENTRY_CHASE_ENABLED = os.getenv("BRACKET_ENTRY_CHASE_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 # Maximum allowed option bid/ask spread as a fraction of mid price.
 # Example: 0.20 = 20% max spread. Set negative to disable this guard.
 OPTIONS_MAX_SPREAD_PCT = float(os.getenv("OPTIONS_MAX_SPREAD_PCT", "0.20"))

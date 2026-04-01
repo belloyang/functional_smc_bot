@@ -334,6 +334,107 @@ def _build_fill_friendly_bracket(ib, action, qty, entry_price, tp_price, sl_pric
     return bracket
 
 
+def _is_terminal_order_status(status: str) -> bool:
+    status = str(status or "").lower()
+    return status in {"filled", "cancelled", "inactive", "api cancelled"}
+
+
+async def _wait_for_parent_fill(ib, parent_trade, timeout_sec: float) -> bool:
+    end_time = time.monotonic() + max(0.0, timeout_sec)
+    while time.monotonic() < end_time:
+        status = str(getattr(parent_trade.orderStatus, "status", "") or "")
+        filled = float(getattr(parent_trade.orderStatus, "filled", 0) or 0)
+        remaining = float(getattr(parent_trade.orderStatus, "remaining", 0) or 0)
+        if filled > 0 and remaining <= 0:
+            return True
+        if _is_terminal_order_status(status) and status.lower() != "filled":
+            return False
+        await asyncio.sleep(0.25)
+    return False
+
+
+async def _chase_or_cancel_unfilled_parent(
+    ib,
+    contract,
+    parent_trade,
+    *,
+    min_tick=0.01,
+    label="",
+):
+    """
+    Give the parent entry order a short window to fill. If it stays passive, chase once
+    to the current marketable price and cancel if it still does not fill.
+    """
+    if parent_trade is None:
+        return False
+
+    if await _wait_for_parent_fill(
+        ib,
+        parent_trade,
+        float(getattr(config, "BRACKET_ENTRY_INITIAL_WAIT_SEC", 8)),
+    ):
+        return True
+
+    parent_order = getattr(parent_trade, "order", None)
+    parent_status = str(getattr(parent_trade.orderStatus, "status", "") or "")
+    if parent_order is None or _is_terminal_order_status(parent_status):
+        return parent_status.lower() == "filled"
+
+    chase_enabled = bool(getattr(config, "BRACKET_ENTRY_CHASE_ENABLED", True))
+    order_type = str(getattr(parent_order, "orderType", "") or "").upper()
+    action = str(getattr(parent_order, "action", "") or "").upper()
+
+    if chase_enabled and order_type == "LMT":
+        ib.reqMktData(contract)
+        ticker = None
+        for _ in range(6):
+            await asyncio.sleep(0.5)
+            ticker = ib.ticker(contract)
+            bid = float(getattr(ticker, "bid", 0) or 0) if ticker else 0.0
+            ask = float(getattr(ticker, "ask", 0) or 0) if ticker else 0.0
+            last = float(getattr(ticker, "last", 0) or 0) if ticker else 0.0
+            market = float(ticker.marketPrice() or 0) if ticker else 0.0
+            if action == "BUY":
+                chase_price = ask or last or market
+                if chase_price > 0:
+                    new_lmt = _round_to_tick(chase_price, min_tick)
+                    if new_lmt > float(getattr(parent_order, "lmtPrice", 0) or 0):
+                        parent_order.lmtPrice = new_lmt
+                        ib.placeOrder(contract, parent_order)
+                        print(
+                            f"ℹ️ Repriced unfilled entry for {label or getattr(contract, 'localSymbol', '?')} "
+                            f"to {new_lmt:.2f} to improve fill odds."
+                        )
+                    break
+            else:
+                chase_price = bid or last or market
+                if chase_price > 0:
+                    new_lmt = _round_to_tick(chase_price, min_tick)
+                    curr_lmt = float(getattr(parent_order, "lmtPrice", 0) or 0)
+                    if curr_lmt <= 0 or new_lmt < curr_lmt:
+                        parent_order.lmtPrice = new_lmt
+                        ib.placeOrder(contract, parent_order)
+                        print(
+                            f"ℹ️ Repriced unfilled entry for {label or getattr(contract, 'localSymbol', '?')} "
+                            f"to {new_lmt:.2f} to improve fill odds."
+                        )
+                    break
+
+        if await _wait_for_parent_fill(
+            ib,
+            parent_trade,
+            float(getattr(config, "BRACKET_ENTRY_FINAL_WAIT_SEC", 5)),
+        ):
+            return True
+
+    _cancel_ibkr_orders_by_conid(ib, getattr(contract, "conId", 0))
+    print(
+        f"⚠️ Entry did not fill for {label or getattr(contract, 'localSymbol', '?')}. "
+        "Cancelled resting bracket so later signals are not blocked."
+    )
+    return False
+
+
 async def _submit_bracket_with_guard(ib, contract, bracket, label=""):
     """
     Submit bracket orders and verify child exits were accepted.
@@ -1550,7 +1651,25 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     sl_price,
                     min_tick=min_tick,
                 )
-                await _submit_bracket_with_guard(ib, opt_contract, bracket, label=opt_contract.localSymbol)
+                placed_trades = await _submit_bracket_with_guard(
+                    ib,
+                    opt_contract,
+                    bracket,
+                    label=opt_contract.localSymbol,
+                )
+                parent_trade = placed_trades[0] if placed_trades else None
+                filled = await _chase_or_cancel_unfilled_parent(
+                    ib,
+                    opt_contract,
+                    parent_trade,
+                    min_tick=min_tick,
+                    label=opt_contract.localSymbol,
+                )
+                if not filled:
+                    ticker_state.pop("pending_entry", None)
+                    state[symbol] = ticker_state
+                    save_trade_state(state, symbol)
+                    return
                 
                 # Notify
                 send_discord_live_trading_notification(
@@ -1570,11 +1689,7 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                 print(f"✅ OPTION BRACKET SUBMITTED: {opt_contract.localSymbol}")
                 # Update state
                 ticker_state["daily_trade_count"] = daily_count + 1
-                ticker_state["pending_entry"] = {
-                    "con_id": opt_contract.conId,
-                    "right": desired_right,
-                    "submitted_at": datetime.now(timezone.utc).isoformat(),
-                }
+                ticker_state.pop("pending_entry", None)
                 state[symbol] = ticker_state
                 save_trade_state(state, symbol)
                 return
@@ -1621,7 +1736,17 @@ async def place_trade(signal, confidence, symbol, use_daily_cap=True, daily_cap_
                     sl_price,
                     min_tick=0.01,
                 )
-                await _submit_bracket_with_guard(ib, contract, bracket, label=symbol)
+                placed_trades = await _submit_bracket_with_guard(ib, contract, bracket, label=symbol)
+                parent_trade = placed_trades[0] if placed_trades else None
+                filled = await _chase_or_cancel_unfilled_parent(
+                    ib,
+                    contract,
+                    parent_trade,
+                    min_tick=0.01,
+                    label=symbol,
+                )
+                if not filled:
+                    return
                 
                 # Notify
                 send_discord_live_trading_notification(

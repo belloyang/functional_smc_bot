@@ -4,3 +4,4 @@ __pycache__/
 backtest-runs/
 backtest-output
 trade_state*.json
+.aider*
