@@ -1248,8 +1248,14 @@ async def cancel_all_orders_for_symbol(symbol):
 def _cancel_ibkr_orders_by_conid(ib, con_id):
     """Cancel all IBKR open orders matching a given conId (options)."""
     try:
-        for o in ib.openOrders():
-            c = o.contract
+        for trade in ib.openTrades():
+            c = getattr(trade, "contract", None)
+            o = getattr(trade, "order", None)
+            status = str(getattr(getattr(trade, "orderStatus", None), "status", "") or "").lower()
+            if o is None or c is None:
+                continue
+            if status in {"filled", "cancelled", "inactive", "api cancelled"}:
+                continue
             if hasattr(c, "conId") and c.conId == con_id:
                 ib.cancelOrder(o)
                 print(f"Cancelled stale IBKR order {getattr(o, 'orderId', '?')} for conId {con_id}")
