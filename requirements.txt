@@ -7,3 +7,4 @@ python-dotenv
 scipy
 matplotlib
 pytz
+tzdata

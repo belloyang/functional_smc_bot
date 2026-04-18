@@ -1620,24 +1620,12 @@ class TradingSession:
         
         # Capture opening state
         try:
-            account = trade_client.get_account()
-            self.opening_equity = float(account.equity)
-            self.day_starting_equity = float(account.equity) # Initialize daily starting equity
-            
-            # Capture opening positions
-            positions = trade_client.get_all_positions()
-            for pos in positions:
-                self.opening_positions.append({
-                    'symbol': pos.symbol,
-                    'qty': float(pos.qty),
-                    'side': pos.side.value,
-                    'entry_price': float(pos.avg_entry_price),
-                    'market_value': float(pos.market_value),
-                    'unrealized_pl': float(pos.unrealized_pl)
-                })
+            self.opening_equity, self.opening_positions = self._capture_broker_snapshot()
+            self.day_starting_equity = float(self.opening_equity)
         except Exception as e:
             print(f"⚠️ Could not capture opening state: {e}")
             self.opening_equity = 0.0
+            self.day_starting_equity = 0.0
         
     def record_trade(self):
         """Record that a trade was executed."""
@@ -1650,6 +1638,76 @@ class TradingSession:
             'pnl': pnl,
             'win': pnl > 0
         })
+
+    def _capture_broker_snapshot(self):
+        """Capture account equity and open positions from the active broker."""
+        ib = getattr(ibkr_mgr, "ib", None)
+        if ib is not None and getattr(ib, "isConnected", lambda: False)():
+            equity = 0.0
+            positions = []
+            for v in ib.accountValues():
+                if getattr(v, "tag", "") == "NetLiquidation":
+                    try:
+                        equity = float(v.value)
+                    except Exception:
+                        pass
+                    break
+
+            for pos in ib.positions():
+                if pos.position == 0:
+                    continue
+                contract = pos.contract
+                qty = float(abs(pos.position))
+                avg_cost = float(getattr(pos, "avgCost", 0.0) or 0.0)
+                multiplier = float(getattr(contract, "multiplier", 1) or 1)
+                entry_price = avg_cost / multiplier if multiplier > 0 else avg_cost
+
+                current_price = 0.0
+                try:
+                    ib.reqMktData(contract)
+                    ticker = ib.ticker(contract)
+                    if ticker is not None:
+                        current_price = float(ticker.marketPrice() or 0.0)
+                        if current_price <= 0:
+                            bid = float(getattr(ticker, "bid", 0) or 0)
+                            ask = float(getattr(ticker, "ask", 0) or 0)
+                            last = float(getattr(ticker, "last", 0) or 0)
+                            current_price = (bid + ask) / 2.0 if bid > 0 and ask > 0 else (last or bid or ask or 0.0)
+                except Exception:
+                    pass
+
+                market_value = qty * current_price * multiplier if current_price > 0 else qty * entry_price * multiplier
+                unrealized_pl = (current_price - entry_price) * qty * multiplier if current_price > 0 else 0.0
+                side = "long" if pos.position > 0 else "short"
+                symbol = getattr(contract, "localSymbol", None) or getattr(contract, "symbol", "?")
+                positions.append({
+                    'symbol': symbol,
+                    'qty': qty,
+                    'side': side,
+                    'entry_price': entry_price,
+                    'current_price': current_price,
+                    'market_value': market_value,
+                    'unrealized_pl': unrealized_pl,
+                    'unrealized_plpc': (unrealized_pl / (qty * entry_price * multiplier)) if entry_price > 0 and qty > 0 else 0.0,
+                })
+
+            return equity, positions
+
+        account = trade_client.get_account()
+        equity = float(account.equity)
+        positions = []
+        for pos in trade_client.get_all_positions():
+            positions.append({
+                'symbol': pos.symbol,
+                'qty': float(pos.qty),
+                'side': pos.side.value,
+                'entry_price': float(pos.avg_entry_price),
+                'current_price': float(pos.current_price),
+                'market_value': float(pos.market_value),
+                'unrealized_pl': float(pos.unrealized_pl),
+                'unrealized_plpc': float(pos.unrealized_plpc),
+            })
+        return equity, positions
 
     def _get_closed_trades_today_stats(self):
         """
@@ -1777,22 +1835,8 @@ class TradingSession:
         account_equity_valid = False
         closing_positions = []
         try:
-            account = trade_client.get_account()
-            closing_equity = float(account.equity)
+            closing_equity, closing_positions = self._capture_broker_snapshot()
             account_equity_valid = closing_equity > 0
-            
-            positions = trade_client.get_all_positions()
-            for pos in positions:
-                closing_positions.append({
-                    'symbol': pos.symbol,
-                    'qty': float(pos.qty),
-                    'side': pos.side.value,
-                    'entry_price': float(pos.avg_entry_price),
-                    'current_price': float(pos.current_price),
-                    'market_value': float(pos.market_value),
-                    'unrealized_pl': float(pos.unrealized_pl),
-                    'unrealized_plpc': float(pos.unrealized_plpc)
-                })
         except Exception as e:
             print(f"⚠️ Could not fetch closing state: {e}")
         
