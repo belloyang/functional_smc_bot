@@ -49,6 +49,39 @@ Notes:
 - For Google Compute Engine, Docker on the VM is a better fit than Cloud Run because this bot is a long-running process.
 - Override the container command to run `scripts/analyze_today.py` or other scripts as needed.
 
+## Docker Releases
+This repo includes a GitHub Actions workflow that publishes Docker images to GitHub Container Registry (GHCR) whenever a version tag like `v1.5.0` is pushed.
+
+Image format:
+```bash
+ghcr.io/<owner>/<repo>:v1.5.0
+ghcr.io/<owner>/<repo>:latest
+```
+
+Release flow:
+1. Run the existing manual release workflow in GitHub Actions (`Manual Release`).
+2. That workflow updates `app/__init__.py`, creates a git tag such as `v1.5.0`, and pushes it.
+3. The `Publish Docker Image` workflow builds the Docker image and pushes it to GHCR automatically.
+
+Deploy from GHCR on your VM:
+```bash
+docker pull ghcr.io/<owner>/<repo>:v1.5.0
+
+docker run -d \
+  --name smc-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  -e APP_RUNTIME_DIR=/app/runtime \
+  -v "$(pwd)/runtime:/app/runtime" \
+  ghcr.io/<owner>/<repo>:v1.5.0 \
+  python -m app.bot QQQ --options
+```
+
+Notes:
+- The workflow uses `GITHUB_TOKEN`, so no separate Docker Hub credentials are required.
+- If the repository or package is private, the VM will need a GHCR login before `docker pull`.
+- `latest` is updated on every pushed version tag; use the versioned tag for stable deployments.
+
 ## Environment variables
 The project loads `.env` from the current working directory through `app/config.py`.
 
