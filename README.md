@@ -48,6 +48,7 @@ Notes:
 - `APP_RUNTIME_DIR` keeps `global_safety.json` and `trade_state_*.json` under a mounted folder so container restarts do not lose bot state.
 - For Google Compute Engine, Docker on the VM is a better fit than Cloud Run because this bot is a long-running process.
 - Override the container command to run `scripts/analyze_today.py` or other scripts as needed.
+- Published images support both `linux/amd64` and `linux/arm64` when built through GitHub Actions.
 
 ## Docker Releases
 This repo includes a GitHub Actions workflow that publishes Docker images to GitHub Container Registry (GHCR) whenever a version tag like `v1.5.0` is pushed.
