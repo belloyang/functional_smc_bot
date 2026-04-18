@@ -18,6 +18,37 @@ Trading and backtesting bot for US stocks/options with SMC-style signal logic.
 python3.12 -m pip install -r requirements.txt
 ```
 
+## Docker
+Build the image:
+```bash
+docker build -t smc-bot:latest .
+```
+
+Run the live bot with env file and persisted runtime state:
+```bash
+docker run -d \
+  --name smc-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  -e APP_RUNTIME_DIR=/app/runtime \
+  -v "$(pwd)/runtime:/app/runtime" \
+  smc-bot:latest python -m app.bot QQQ --options
+```
+
+Run a backtest in the same image:
+```bash
+docker run --rm \
+  --env-file .env \
+  -v "$(pwd)/backtest-output:/app/backtest-output" \
+  smc-bot:latest \
+  python scripts/backtest.py QQQ --days 90 --balance 2500 --options
+```
+
+Notes:
+- `APP_RUNTIME_DIR` keeps `global_safety.json` and `trade_state_*.json` under a mounted folder so container restarts do not lose bot state.
+- For Google Compute Engine, Docker on the VM is a better fit than Cloud Run because this bot is a long-running process.
+- Override the container command to run `scripts/analyze_today.py` or other scripts as needed.
+
 ## Environment variables
 The project loads `.env` from the current working directory through `app/config.py`.
 

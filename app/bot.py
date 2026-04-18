@@ -1302,7 +1302,17 @@ from alpaca.trading.requests import ReplaceOrderRequest
 # ================= STATE MANAGEMENT =================
 
 STATE_FILE = "trade_state.json"  # Default fallback
-GLOBAL_SAFETY_FILE = "global_safety.json"
+
+
+def _runtime_path(filename: str) -> str:
+    runtime_dir = os.getenv("APP_RUNTIME_DIR", "").strip()
+    if not runtime_dir:
+        return filename
+    os.makedirs(runtime_dir, exist_ok=True)
+    return os.path.join(runtime_dir, filename)
+
+
+GLOBAL_SAFETY_FILE = _runtime_path("global_safety.json")
 
 def load_global_safety_state():
     if os.path.exists(GLOBAL_SAFETY_FILE):
@@ -1348,10 +1358,13 @@ def mark_loss():
 def get_state_file_path(symbol=None):
     """Returns the state file path, prioritized by --state-file then symbol-specific."""
     if hasattr(args, 'state_file') and args.state_file:
-        return args.state_file
+        state_file = args.state_file
+        if os.path.isabs(state_file):
+            return state_file
+        return _runtime_path(state_file)
     if symbol:
-        return f"trade_state_{symbol}.json"
-    return STATE_FILE
+        return _runtime_path(f"trade_state_{symbol}.json")
+    return _runtime_path(STATE_FILE)
 
 def load_trade_state(symbol=None):
     file_path = get_state_file_path(symbol)
