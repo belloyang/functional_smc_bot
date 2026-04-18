@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -31,15 +32,71 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Capture current latest tag
+        id: tags_before
+        run: |
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
       - name: Run Release Script
         run: python scripts/release.py --type ${{ github.event.inputs.bump_type }}
+
+      - name: Detect newly created release tag
+        id: release_tag
+        run: |
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          if [ -n "$latest_tag" ] && [ "$latest_tag" != "${{ steps.tags_before.outputs.latest_tag }}" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Push changes
         run: |
           git push
           git push --tags
+
+      - name: Log in to GHCR
+        if: steps.release_tag.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check out release tag
+        if: steps.release_tag.outputs.publish == 'true'
+        run: |
+          git fetch --tags
+          git checkout "${{ steps.release_tag.outputs.latest_tag }}"
+
+      - name: Extract Docker metadata
+        if: steps.release_tag.outputs.publish == 'true'
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.release_tag.outputs.latest_tag }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        if: steps.release_tag.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -60,8 +60,8 @@ ghcr.io/<owner>/<repo>:latest
 
 Release flow:
 1. Run the existing manual release workflow in GitHub Actions (`Manual Release`).
-2. That workflow updates `app/__init__.py`, creates a git tag such as `v1.5.0`, and pushes it.
-3. The `Publish Docker Image` workflow builds the Docker image and pushes it to GHCR automatically.
+2. That workflow updates `app/__init__.py`, creates a git tag such as `v1.5.0`, pushes it, and publishes the Docker image to GHCR in the same workflow run.
+3. The standalone `Publish Docker Image` workflow can still be used for manual tag-based publishes if needed.
 
 Deploy from GHCR on your VM:
 ```bash
