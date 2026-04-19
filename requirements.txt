@@ -1,5 +1,4 @@
 alpaca-py
-ib_insync
 pandas>=2.0.0
 numpy>=2.2.6
 pandas-ta
