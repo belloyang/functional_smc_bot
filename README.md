@@ -83,6 +83,43 @@ Notes:
 - If the repository or package is private, the VM will need a GHCR login before `docker pull`.
 - `latest` is updated on every pushed version tag; use the versioned tag for stable deployments.
 
+## Production With systemd
+For a single GCE VM, a good production setup is Docker plus `systemd` supervision.
+
+A ready-to-edit service template is included at:
+```bash
+deploy/systemd/smc-bot.service
+```
+
+Suggested VM layout:
+```bash
+/opt/smc-bot/.env
+/opt/smc-bot/runtime/
+```
+
+Install flow on the VM:
+```bash
+sudo mkdir -p /opt/smc-bot/runtime
+sudo cp deploy/systemd/smc-bot.service /etc/systemd/system/smc-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable smc-bot
+sudo systemctl start smc-bot
+```
+
+Useful commands:
+```bash
+sudo systemctl status smc-bot
+sudo systemctl restart smc-bot
+sudo systemctl stop smc-bot
+journalctl -u smc-bot -f
+```
+
+Before starting, edit the service file and set:
+- `BOT_IMAGE` to the version you want, for example `ghcr.io/belloyang/functional_smc_bot:v1.5.0`
+- `BOT_ENV_FILE` to your env file path
+- `BOT_RUNTIME_DIR` to your persistent runtime directory
+- `BOT_COMMAND` to the symbol/mode you want to run
+
 ## Environment variables
 The project loads `.env` from the current working directory through `app/config.py`.
 
