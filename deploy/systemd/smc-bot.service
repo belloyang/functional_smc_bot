@@ -1,0 +1,31 @@
+[Unit]
+Description=SMC Trading Bot Container
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+
+# Adjust these paths and image tag for your VM layout.
+Environment=BOT_NAME=smc-bot
+Environment=BOT_IMAGE=ghcr.io/belloyang/functional_smc_bot:v1.5.8
+Environment=BOT_ENV_FILE=/opt/smc-bot/.env
+Environment=BOT_RUNTIME_DIR=/opt/smc-bot/runtime
+Environment=BOT_COMMAND="python -m app.bot QQQ --options --option-allocation 0.5"
+
+ExecStartPre=/bin/mkdir -p ${BOT_RUNTIME_DIR}
+ExecStartPre=-/usr/bin/docker rm -f ${BOT_NAME}
+ExecStart=/bin/sh -c '/usr/bin/docker run --name ${BOT_NAME} \
+  --env-file ${BOT_ENV_FILE} \
+  -e APP_RUNTIME_DIR=/app/runtime \
+  -v ${BOT_RUNTIME_DIR}:/app/runtime \
+  ${BOT_IMAGE} ${BOT_COMMAND}'
+ExecStop=/usr/bin/docker stop ${BOT_NAME}
+ExecStopPost=-/usr/bin/docker rm -f ${BOT_NAME}
+
+[Install]
+WantedBy=multi-user.target

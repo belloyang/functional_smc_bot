@@ -20,6 +20,108 @@ This is a trading bot that uses Alpaca API to trade stocks and options.
 python3.12 -m pip install -r requirements.txt
 ```
 
+## Docker
+Build the image:
+```bash
+docker build -t smc-bot:latest .
+```
+
+Run the live bot with env file and persisted runtime state:
+```bash
+docker run -d \
+  --name smc-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  -e APP_RUNTIME_DIR=/app/runtime \
+  -v "$(pwd)/runtime:/app/runtime" \
+  smc-bot:latest python -m app.bot QQQ --options
+```
+
+Run a backtest in the same image:
+```bash
+docker run --rm \
+  --env-file .env \
+  -v "$(pwd)/backtest-output:/app/backtest-output" \
+  smc-bot:latest \
+  python scripts/backtest.py QQQ --days 90 --balance 2500 --options
+```
+
+Notes:
+- `APP_RUNTIME_DIR` keeps `global_safety.json` and `trade_state_*.json` under a mounted folder so container restarts do not lose bot state.
+- For Google Compute Engine, Docker on the VM is a better fit than Cloud Run because this bot is a long-running process.
+- Override the container command to run `scripts/analyze_today.py` or other scripts as needed.
+- Published images support both `linux/amd64` and `linux/arm64` when built through GitHub Actions.
+
+## Docker Releases
+This repo includes GitHub Actions workflows that publish Docker images to GitHub Container Registry (GHCR) whenever a version tag like `v1.5.0` is pushed or a manual release creates a new tag.
+
+Image format:
+```bash
+ghcr.io/<owner>/<repo>:v1.5.0
+ghcr.io/<owner>/<repo>:latest
+```
+
+Release flow:
+1. Run the existing manual release workflow in GitHub Actions (`Manual Release`).
+2. That workflow updates `app/__init__.py`, creates a git tag such as `v1.5.0`, pushes it, and publishes the Docker image to GHCR in the same workflow run.
+3. The standalone `Publish Docker Image` workflow can still be used for manual tag-based publishes if needed.
+
+Deploy from GHCR on your VM:
+```bash
+docker pull ghcr.io/<owner>/<repo>:v1.5.0
+
+docker run -d \
+  --name smc-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  -e APP_RUNTIME_DIR=/app/runtime \
+  -v "$(pwd)/runtime:/app/runtime" \
+  ghcr.io/<owner>/<repo>:v1.5.0 \
+  python -m app.bot QQQ --options
+```
+
+Notes:
+- The workflow uses `GITHUB_TOKEN`, so no separate Docker Hub credentials are required.
+- If the repository or package is private, the VM will need a GHCR login before `docker pull`.
+- `latest` is updated on every pushed version tag; use the versioned tag for stable deployments.
+
+## Production With systemd
+For a single GCE VM, a good production setup is Docker plus `systemd` supervision.
+
+A ready-to-edit service template is included at:
+```bash
+deploy/systemd/smc-bot.service
+```
+
+Suggested VM layout:
+```bash
+/opt/smc-bot/.env
+/opt/smc-bot/runtime/
+```
+
+Install flow on the VM:
+```bash
+sudo mkdir -p /opt/smc-bot/runtime
+sudo cp deploy/systemd/smc-bot.service /etc/systemd/system/smc-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable smc-bot
+sudo systemctl start smc-bot
+```
+
+Useful commands:
+```bash
+sudo systemctl status smc-bot
+sudo systemctl restart smc-bot
+sudo systemctl stop smc-bot
+journalctl -u smc-bot -f
+```
+
+Before starting, edit the service file and set:
+- `BOT_IMAGE` to the version you want, for example `ghcr.io/belloyang/functional_smc_bot:v1.5.0`
+- `BOT_ENV_FILE` to your env file path
+- `BOT_RUNTIME_DIR` to your persistent runtime directory
+- `BOT_COMMAND` to the symbol/mode you want to run
+
 ## Configuration
 Update `app/config.py` for global defaults:
 - `STOCK_ALLOCATION_PCT`: Max % of equity for stock positions per ticker (default: 0.80).
@@ -85,5 +187,4 @@ Press `Ctrl+C` to gracefully stop the bot and see a session summary.
 - `--max-trades`: Maximum number of trades per session
 - `--stock-budget`: Manual % allocation for stock mode (overrides config)
 - `--option-budget`: Manual % allocation for option mode (overrides config)
-
 

@@ -3,6 +3,13 @@ from alpaca.trading import TradingClient
 import random
 from . import __version__
 
+
+def _clean_env_value(value):
+    if value is None:
+        return None
+    return value.strip().strip('"').strip("'")
+
+
 def load_env(file_path=".env"):
     """Simple helper to load .env variables without external dependencies."""
     if os.path.exists(file_path):
@@ -21,7 +28,7 @@ def load_env(file_path=".env"):
                     key, value = line.split("=", 1)
                     # Clean up key and value (remove spaces and quotes)
                     key = key.strip()
-                    value = value.strip().strip('"').strip("'")
+                    value = _clean_env_value(value)
                     os.environ[key] = value
 
 # Load environment variables from .env if it exists
@@ -39,10 +46,10 @@ IBKR_HIST_MAX_ATTEMPTS = int(os.getenv("IBKR_HIST_MAX_ATTEMPTS", "2"))
 IBKR_HIST_BACKOFF_BASE_SEC = float(os.getenv("IBKR_HIST_BACKOFF_BASE_SEC", "1.0"))
 
 # --- ALPACA (BACKWARD COMPATIBILITY) ---
-API_KEY = os.getenv("ALPACA_API_KEY")
-API_SECRET = os.getenv("ALPACA_API_SECRET")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-DISCORD_WEBHOOK_URL_LIVE_TRADING = os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING")
+API_KEY = _clean_env_value(os.getenv("ALPACA_API_KEY"))
+API_SECRET = _clean_env_value(os.getenv("ALPACA_API_SECRET"))
+DISCORD_WEBHOOK_URL = _clean_env_value(os.getenv("DISCORD_WEBHOOK_URL"))
+DISCORD_WEBHOOK_URL_LIVE_TRADING = _clean_env_value(os.getenv("DISCORD_WEBHOOK_URL_LIVE_TRADING"))
 
 if not API_KEY or not API_SECRET:
     print("WARNING: ALPACA_API_KEY or ALPACA_API_SECRET not found in environment variables.")
